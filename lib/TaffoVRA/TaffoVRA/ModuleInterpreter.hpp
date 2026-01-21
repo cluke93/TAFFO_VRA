@@ -40,24 +40,34 @@ struct VRALoopInfo {
     VRALoopInfo(llvm::Loop* L) : L(L) {}
 };
 
+enum VRAInspectionKind {
+    REC,        // known recurrence
+    INIT,       // initialization
+    UNKNOWN     // unhandled
+};
+
 struct VRARecurrenceInfo {
     const llvm::Value* root;
-    llvm::SmallVector<llvm::Value*> chain;
+    llvm::SmallVector<const llvm::Value*> chain;
+    VRAInspectionKind kind;
 
     llvm::SmallVector<llvm::Function*> depsOnFn;
     llvm::SmallVector<llvm::Value*> depsOnRR;
 
-    llvm::DenseMap<llvm::Value*, std::shared_ptr<RangedRecurrence>> RRs;
+    llvm::DenseMap<const llvm::Value*, std::shared_ptr<RangedRecurrence>> RRs;
     std::shared_ptr<Range> lastRange;
     u_int64_t lastRangeComputedAt = 0;
+
+    VRARecurrenceInfo(const llvm::Value* root): root(root) {}
+    bool isValid() { return chain.size() > 0; }
+    std::string chainToString();
 };
 
-//todo: manca lo scope corrente
 struct VRAFunctionInfo {
     llvm::Function* F;
     llvm::SmallVector<llvm::BasicBlock*> bbFlow;
-    llvm::DenseMap<llvm::Loop*, VRALoopInfo> loops;
-    llvm::DenseMap<llvm::Value*, VRARecurrenceInfo> RRs;
+    llvm::DenseMap<const llvm::Loop*, VRALoopInfo> loops;
+    llvm::DenseMap<const llvm::Value*, VRARecurrenceInfo> RRs;
     FunctionScope scope;
 
     std::shared_ptr<Range> lastRange;
@@ -76,6 +86,8 @@ struct VRAFunctionInfo {
 
         //todo: argument handlers??
     }
+
+    size_t countLoops() { return loops.size(); }
 };
 
 class ModuleInterpreter {
@@ -108,8 +120,9 @@ protected:
 
     // 2) INSPECTION PHASE METHODS
     void inspect();
-    void handlePHIChain(llvm::Loop* L, const llvm::PHINode* PHI, VRARecurrenceInfo& VRI);
-    void handleStoreChain(llvm::Loop* L, const llvm::StoreInst* Store, VRARecurrenceInfo& VRI);
+    bool isInductionVariable(llvm::Function *F, llvm::Loop* L, const llvm::PHINode* PHI);
+    void handlePHIChain(VRAFunctionInfo VFI, llvm::Loop* L, const llvm::PHINode* PHI, VRARecurrenceInfo& VRI);
+    void handleStoreChain(VRAFunctionInfo VFI, llvm::Loop* L, const llvm::StoreInst* Store, VRARecurrenceInfo& VRI);
 
     // 3) ASSEMBLING METHODS
     void assemble();
@@ -126,6 +139,26 @@ protected:
 
     // 5) PROPAGATION METHODS
     void propagate();
+
+
+
+
+    // Statistic methods
+    size_t countLoops() {
+        size_t num_loops = 0;
+        for (auto [F, VFI] : FNs) {
+            num_loops += VFI.countLoops();
+        }
+        return num_loops;
+    }
+
+    size_t countPotentialRecurrences() {
+        size_t num_rr = 0;
+        for (auto [F, VFI] : FNs) {
+            num_rr += VFI.RRs.size();
+        }
+        return num_rr;
+    }
 
 private:
 
