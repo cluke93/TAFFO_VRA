@@ -36,8 +36,8 @@ public:
   std::shared_ptr<CILogger> getLogger() const override { return Logger; }
   std::shared_ptr<CodeAnalyzer> clone() override;
   void analyzeInstruction(llvm::Instruction* I) override;
-  void
-  setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) override;
+  void analyzePHIStartInstruction(llvm::Instruction* I) override;
+  void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) override;
   bool requiresInterpretation(llvm::Instruction* I) const override;
   void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
   void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;

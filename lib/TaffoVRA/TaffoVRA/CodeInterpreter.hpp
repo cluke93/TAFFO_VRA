@@ -65,6 +65,7 @@ class CodeAnalyzer : public AnalysisStore {
 public:
   virtual std::shared_ptr<CodeAnalyzer> clone() = 0;
   virtual void analyzeInstruction(llvm::Instruction* I) = 0;
+  virtual void analyzePHIStartInstruction(llvm::Instruction* I) = 0;
   virtual void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) = 0;
   virtual bool requiresInterpretation(llvm::Instruction* I) const = 0;
   virtual void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;

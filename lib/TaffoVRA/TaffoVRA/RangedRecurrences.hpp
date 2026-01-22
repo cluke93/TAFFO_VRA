@@ -19,6 +19,7 @@ public:
   virtual ~RangedRecurrence() = default;
 
   virtual Kind kind() const noexcept { return Kind::Unknown; }
+  static bool classof(const RangedRecurrence*) { return true; }
 
   virtual std::shared_ptr<Range> at(std::uint64_t N) const = 0;
 
@@ -77,6 +78,10 @@ public:
     : Start(std::move(start)), Step(std::move(step)) {}
 
   Kind kind() const noexcept override { return Kind::Affine; }
+  static bool classof(const RangedRecurrence* RR) {
+    return RR && RR->kind() == Kind::Affine;
+  }
+
   std::shared_ptr<Range> at(std::uint64_t i) const override;
   std::shared_ptr<Range> envelopeUpTo(std::uint64_t N) const;
   std::string toString() const override;

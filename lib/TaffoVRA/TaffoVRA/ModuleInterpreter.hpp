@@ -10,15 +10,25 @@
 namespace taffo {
 
 class Range;
+class VRAGlobalStore;
 
 enum FollowingPathResponse {
     ENQUE_BLOCK, NO_ENQUE, LOOP_JOIN, LOOP_FORK
 };
 
+enum class TripCountReason {
+    Unknown = 0,
+    DeducedBySCEV,
+    HeuristicFallback
+    // (slot futuri) UserHint, BoundedByGuard, ecc.
+};
+
 struct VRALoopInfo {
     llvm::Loop* L;
-    u_int64_t TripCount;
+    u_int64_t TripCount = 0;
+    TripCountReason Reason = TripCountReason::Unknown;
     llvm::Value* InductionVariable;
+    llvm::CmpInst* exitCmp = nullptr;
 
     llvm::SmallVector<llvm::BasicBlock*> bbFlow;
 
@@ -54,10 +64,11 @@ struct VRARecurrenceInfo {
     llvm::SmallVector<llvm::Function*> depsOnFn;
     llvm::SmallVector<llvm::Value*> depsOnRR;
 
-    llvm::DenseMap<const llvm::Value*, std::shared_ptr<RangedRecurrence>> RRs;
-    std::shared_ptr<Range> lastRange;
+    std::shared_ptr<RangedRecurrence> RR = nullptr;
+    std::shared_ptr<Range> lastRange = nullptr;
     u_int64_t lastRangeComputedAt = 0;
 
+    VRARecurrenceInfo(): root(nullptr) {}
     VRARecurrenceInfo(const llvm::Value* root): root(root) {}
     bool isValid() { return chain.size() > 0; }
     std::string chainToString();
@@ -88,6 +99,12 @@ struct VRAFunctionInfo {
     }
 
     size_t countLoops() { return loops.size(); }
+    bool existAtLeastOneLoopWithoutTripCount() {
+        for (auto [_, loop] : loops) {
+            if (loop.TripCount == 0) return true;
+        }
+        return false;
+    }
 };
 
 class ModuleInterpreter {
@@ -95,6 +112,7 @@ public:
 
     std::shared_ptr<AnalysisStore> getStoreForValue(const llvm::Value* V) const;
     std::shared_ptr<AnalysisStore> getGlobalStore() const { return GlobalStore; }
+    std::shared_ptr<AnalysisStore> getOriginalGlobalStore() const { return OriginalGlobalStore; }
     std::shared_ptr<AnalysisStore> getFunctionStore() const {
         if (curFn.empty())
             return nullptr;
@@ -107,7 +125,7 @@ public:
 
     void interpret();
 
-    ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, std::shared_ptr<AnalysisStore> GlobalStore): M(M), GlobalStore(GlobalStore), curFn(), MAM(MAM), FNs() {}
+    ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, std::shared_ptr<AnalysisStore> GlobalStore);
 
 protected:
 
@@ -126,7 +144,12 @@ protected:
 
     // 3) ASSEMBLING METHODS
     void assemble();
+
+    bool isSolvableDependenceTree(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
+    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F);
+
     bool isFakeRecurrence(VRARecurrenceInfo& VRI);
+    bool isUnknownRecurrence(VRARecurrenceInfo& VRI);
     bool isAffineRecurrence(VRARecurrenceInfo& VRI);
     bool isDeltaAffineRecurrence(VRARecurrenceInfo& VRI);
     bool isGeometricRecurrence(VRARecurrenceInfo& VRI);
@@ -136,6 +159,12 @@ protected:
 
     // 4) TRIP COUNT METHODS
     void tripCount();
+    bool existAtLeastOneLoopWithoutTripCount() {
+        for (auto [_, FN] : FNs) {
+            if (FN.existAtLeastOneLoopWithoutTripCount()) return true;
+        }
+        return false;
+    }
 
     // 5) PROPAGATION METHODS
     void propagate();
@@ -164,10 +193,13 @@ private:
 
     llvm::Module& M;
     std::shared_ptr<AnalysisStore> GlobalStore;
+    std::shared_ptr<AnalysisStore> OriginalGlobalStore;
     llvm::SmallVector<llvm::Function*, 4U> curFn;    //current function scope
     llvm::ModuleAnalysisManager& MAM;
 
     llvm::DenseMap<llvm::Function*, VRAFunctionInfo> FNs;
+
+    llvm::SmallVector<const llvm::Value*> solvedRR;
 
 };
 

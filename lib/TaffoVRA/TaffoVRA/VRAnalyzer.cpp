@@ -518,6 +518,23 @@ void VRAnalyzer::handlePhiNode(const Instruction* phi) {
   LLVM_DEBUG(Logger->logRangeln(res));
 }
 
+void VRAnalyzer::analyzePHIStartInstruction(llvm::Instruction* I) {
+  const PHINode* phi_n = cast<PHINode>(I);
+  if (phi_n->getNumIncomingValues() == 0U)
+    return;
+  LLVM_DEBUG(Logger->logInstruction(I));
+
+  const Value* op = phi_n->getIncomingValue(0);
+  std::shared_ptr<ValueInfo> op_node = getNode(op);
+  if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
+    const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
+    setNode(I, op_range);
+    LLVM_DEBUG(Logger->logRangeln(op_range));
+  } else {
+    LLVM_DEBUG(tda::log() << "unable to retreve start operand of phi node\n");
+  }
+}
+
 void VRAnalyzer::handleSelect(const Instruction* i) {
   const SelectInst* sel = cast<SelectInst>(i);
   // TODO handle pointer select

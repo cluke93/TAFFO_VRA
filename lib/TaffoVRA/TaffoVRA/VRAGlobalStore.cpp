@@ -40,6 +40,34 @@ std::shared_ptr<AnalysisStore> VRAGlobalStore::newFnStore(ModuleInterpreter& MI)
   return std::make_shared<VRAFunctionStore>(std::static_ptr_cast<VRALogger>(MI.getGlobalStore()->getLogger()));
 }
 
+std::shared_ptr<VRAGlobalStore> VRAGlobalStore::deepClone() const {
+  auto clone = std::make_shared<VRAGlobalStore>();
+  clone->Logger = Logger;
+
+  llvm::DenseMap<const ValueInfo*, std::shared_ptr<ValueInfo>> cache;
+  cache.reserve(DerivedRanges.size() + UserInput.size());
+
+  const auto cloneValue = [&](const std::shared_ptr<ValueInfo>& src) -> std::shared_ptr<ValueInfo> {
+    if (!src)
+      return nullptr;
+    if (const auto it = cache.find(src.get()); it != cache.end())
+      return it->second;
+    auto copy = src->clone<ValueInfo>();
+    cache[src.get()] = copy;
+    return copy;
+  };
+
+  clone->DerivedRanges.reserve(DerivedRanges.size());
+  for (const auto& [value, info] : DerivedRanges)
+    clone->DerivedRanges[value] = cloneValue(info);
+
+  clone->UserInput.reserve(UserInput.size());
+  for (const auto& [value, info] : UserInput)
+    clone->UserInput[value] = std::dynamic_ptr_cast<ValueInfoWithRange>(cloneValue(info));
+
+  return clone;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Metadata Processing
 ////////////////////////////////////////////////////////////////////////////////
