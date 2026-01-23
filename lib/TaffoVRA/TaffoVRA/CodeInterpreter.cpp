@@ -1,6 +1,7 @@
 #include "CodeInterpreter.hpp"
 #include "Debug/Logger.hpp"
 #include "TaffoInfo/TaffoInfo.hpp"
+#include "ModuleInterpreter.hpp"
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ScalarEvolution.h>
@@ -41,13 +42,14 @@ void CodeInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Analy
     auto CAIt = Scopes.back().BBAnalyzers.find(BB);
     assert(CAIt != Scopes.back().BBAnalyzers.end());
     std::shared_ptr<CodeAnalyzer> CurAnalyzer = CAIt->second;
+    bool isRangeChanged = false;
 
     DEBUG_WITH_TYPE(GlobalStore->getLogger()->getDebugType(), GlobalStore->getLogger()->logBasicBlock(BB));
     for (llvm::Instruction& I : *BB)
       if (CurAnalyzer->requiresInterpretation(&I))
         interpretCall(CurAnalyzer, &I);
       else
-        CurAnalyzer->analyzeInstruction(&I);
+        CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
 
     assert(Scopes.back().EvalCount[BB] > 0 && "Trying to evaluate block with 0 EvalCount.");
     --(Scopes.back().EvalCount[BB]);
@@ -192,9 +194,10 @@ void CodeInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, l
 
   std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFunctionStore(*this);
 
-  CurAnalyzer->prepareForCall(I, FunctionStore);
+  VRAFunctionInfo VFI(F, getMAM());
+  CurAnalyzer->prepareForCall(I, FunctionStore, VFI);
   interpretFunction(F, FunctionStore);
-  CurAnalyzer->returnFromCall(I, FunctionStore);
+  CurAnalyzer->returnFromCall(I, FunctionStore, VFI);
 
   updateLoopInfo(I->getFunction());
 }

@@ -11,6 +11,8 @@ namespace taffo {
 class CodeInterpreter;
 class CodeAnalyzer;
 class ModuleInterpreter;
+class VRARecurrenceInfo;
+class VRAFunctionInfo;
 
 class CILogger {
 public:
@@ -64,12 +66,16 @@ private:
 class CodeAnalyzer : public AnalysisStore {
 public:
   virtual std::shared_ptr<CodeAnalyzer> clone() = 0;
-  virtual void analyzeInstruction(llvm::Instruction* I) = 0;
+  virtual void analyzeInstruction(llvm::Instruction* I, bool& isRangeChanged) = 0;
   virtual void analyzePHIStartInstruction(llvm::Instruction* I) = 0;
+  virtual void resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, bool& isRangeChanged) = 0;
   virtual void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) = 0;
   virtual bool requiresInterpretation(llvm::Instruction* I) const = 0;
-  virtual void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;
-  virtual void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;
+  virtual void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) = 0;
+  virtual void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) = 0;
+
+  virtual void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) = 0;
+  virtual void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) = 0;
 
   static bool classof(const AnalysisStore* AS) {
     return AS->getKind() >= ASK_VRAGlobalStore && AS->getKind() <= ASK_VRAnalyzer;

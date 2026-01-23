@@ -102,8 +102,12 @@ void ModuleInterpreter::interpret() {
     LLVM_DEBUG(tda::log() << "inspection completed: found " << countPotentialRecurrences() << " potential detectable recurrences.\n");
     LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
 
+    resolve();
+}
+
+void ModuleInterpreter::resolve() {
     size_t iteration = 1;
-    size_t changes = 0;
+    //size_t changes = 0;
     do {
 
         assemble();
@@ -114,18 +118,24 @@ void ModuleInterpreter::interpret() {
 
         if (existAtLeastOneLoopWithoutTripCount()) {
             tripCount();
+
+            LLVM_DEBUG(tda::log() << "\n\n------------------------------------------------------------------------------\n");
+            LLVM_DEBUG(tda::log() << "trip count iter " << iteration << " completed: found " << solvedTC << " trip count.\n");
+            LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
         }
 
-        //propagate();
+        propagate();
 
+        LLVM_DEBUG(tda::log() << "\n\n------------------------------------------------------------------------------\n");
+        LLVM_DEBUG(tda::log() << "propagation iter " << iteration << " completed: changing on " << propagationChanging << " instructions.\n");
+        LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
 
         ++iteration;
         if (MaxPropagation && iteration > MaxPropagation) {
             LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << MaxPropagation << " iteration(s) no fixed point reached\n");
             break;
         }
-    } while (changes != 0);
-
+    } while (propagationChanging != 0);
 }
 
 //==================================================================================================
@@ -134,18 +144,14 @@ void ModuleInterpreter::interpret() {
 
 void ModuleInterpreter::preSeed() {
 
-    bool FoundVisitableFunction = false;
     for (Function& F : M) {
         if (!F.empty() && (TaffoInfo::getInstance().isStartingPoint(F)) && F.getName() == "main") {
-
-            
             interpretFunction(&F);
-
-            FoundVisitableFunction = true;
+            EntryFn = &F;
         }
     }
 
-    if (!FoundVisitableFunction) {
+    if (!EntryFn) {
         LLVM_DEBUG(tda::log() << " No visitable functions found.\n");
     }
 
@@ -154,7 +160,7 @@ void ModuleInterpreter::preSeed() {
 void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore) {
 
 
-    if (FNs.count(F)) {
+    if (FNs.count(F) && FNs[F].bbFlow.size() > 0) {
         LLVM_DEBUG(tda::log() << "FN["<<F->getName()<<"] already interpreted\n");
         return;
     }
@@ -182,12 +188,13 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
         auto CAIt = VFI.scope.BBAnalyzers.find(curBlock);
         assert(CAIt != VFI.scope.BBAnalyzers.end());
         std::shared_ptr<CodeAnalyzer> CurAnalyzer = CAIt->second;
+        bool isRangeChanged = false;
 
         for (llvm::Instruction& I : *curBlock) {
             if (CurAnalyzer->requiresInterpretation(&I)) {
                 interpretCall(CurAnalyzer, &I);
             } else {
-                //CurAnalyzer->analyzeInstruction(&I);
+                CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
             }
         }
 
@@ -355,9 +362,27 @@ void ModuleInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer,
 
     std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFnStore(*this);
 
-    CurAnalyzer->prepareForCall(I, FunctionStore);
+    CurAnalyzer->prepareForCall(I, FunctionStore, FNs[F]);
     interpretFunction(F, FunctionStore);
-    CurAnalyzer->returnFromCall(I, FunctionStore);
+    CurAnalyzer->returnFromCall(I, FunctionStore, FNs[F]);
+}
+
+void ModuleInterpreter::resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged) {
+    llvm::CallBase* CB = llvm::cast<llvm::CallBase>(I);
+    llvm::Function* F = CB->getCalledFunction();
+    if (!F || F->empty())
+        return;
+
+    std::shared_ptr<AnalysisStore> FunctionStore = FNs[F].scope.FunctionStore;
+
+    CurAnalyzer->prepareForCallPropagation(I, FunctionStore, isRangeChanged, FNs[F]);
+    if (isRangeChanged) {
+        propagateFunction(F);
+        CurAnalyzer->returnFromCallPropagation(I, FunctionStore, isRangeChanged, FNs[F]);
+    } else {
+        LLVM_DEBUG(tda::log() << "No arguments are widen, can reuse past range\n");
+    }
+
 }
 
 
@@ -370,12 +395,13 @@ void ModuleInterpreter::inspect() {
     for (auto &Entry : FNs) {
         llvm::Function *F = Entry.first;
         auto &VFI = Entry.second;
-        
+        if (VFI.loops.size() == 0) continue;
+
         for (llvm::Loop *L : getLoopsInnermostFirst(F, *VFI.LI)) {
             for (BasicBlock* loopBlock : L->blocks()) {
                 for (Instruction& I : *loopBlock) {
                     if (!isa<PHINode>(I) && !isa<StoreInst>(I)) continue;
-
+                    
                     VRARecurrenceInfo VRI(static_cast<const llvm::Value*>(&I));
                     if (isa<PHINode>(I) && loopBlock == L->getHeader()) {
                         handlePHIChain(VFI, L, dyn_cast<PHINode>(&I), VRI);
@@ -790,7 +816,7 @@ bool ModuleInterpreter::isUnknownRecurrence(VRARecurrenceInfo& VRI) {
 
     auto StepRange = Range::Top().clone();
 
-    LLVM_DEBUG(tda::log() << "\t\t\trecognized unknown(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n");
+    LLVM_DEBUG(tda::log() << "\t\t\trecognized unknown(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
     VRI.RR = std::make_shared<FakeRangedRecurrence>(StartRange->clone(), StepRange->clone());
     return true;
 }
@@ -815,7 +841,7 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
     if (VRI.kind != VRAInspectionKind::REC) return false;
     LLVM_DEBUG(tda::log() << "\t\ttry to recognize as affine recurrence... \n");
 
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(OriginalGlobalStore)->deepClone();
+    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore)->deepClone();
     const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
     llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
     VRAFunctionInfo &VFI = FNs[F];
@@ -839,17 +865,18 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
         assert(CAIt != VFI.scope.BBAnalyzers.end());
         std::shared_ptr<CodeAnalyzer> CurAnalyzer = CAIt->second;
 
+        bool isRangeChanged = false;
         if (VFI.LI->getLoopFor(curBlock) == L) {
             for (const llvm::Instruction& CI : *curBlock) {
                 llvm::Instruction &I = const_cast<llvm::Instruction &>(CI);
                 if (CurAnalyzer->requiresInterpretation(&I)) {
-                    interpretCall(CurAnalyzer, &I);
+                    resolveCall(CurAnalyzer, &I, isRangeChanged);
                 } else {
                     // if (&I == const_cast<llvm::Instruction*>(InstrRoot)) {
                     if (isa<PHINode>(&I) && curBlock == L->getHeader()) {
                         CurAnalyzer->analyzePHIStartInstruction(&I);
                     } else {
-                        CurAnalyzer->analyzeInstruction(&I);
+                        CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
                     }
                 }
             }
@@ -874,12 +901,12 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
         }
     }
 
-    LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n");
+    LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
     VRI.RR = std::make_shared<AffineRangedRecurrence>(StartRange->clone(), std::move(StepRange));
 
-    LLVM_DEBUG(tda::log() << "[VRA][assemble] stored RR for root="
-                      << VRI.root->getName()
-                      << " ptr=" << (const void*)VRI.root << "\n\n\n");
+    // LLVM_DEBUG(tda::log() << "[VRA][assemble] stored RR for root="
+    //                   << VRI.root->getName()
+    //                   << " ptr=" << (const void*)VRI.root << "\n\n\n");
 
 
     return true;
@@ -890,7 +917,7 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
 //==================================================================================================
 
 void ModuleInterpreter::tripCount() {
-
+    solvedTC = 0;
 
     for (auto &Entry : FNs) {
         llvm::Function *F = Entry.first;
@@ -902,7 +929,7 @@ void ModuleInterpreter::tripCount() {
 
             if (VLI.TripCount > 0) continue;
 
-            LLVM_DEBUG(tda::log() << " INDUCTION:  " << VLI.InductionVariable->getName() << " ptr=" << (const void*)VLI.InductionVariable << "\n");
+            //LLVM_DEBUG(tda::log() << " INDUCTION:  " << VLI.InductionVariable->getName() << " ptr=" << (const void*)VLI.InductionVariable << "\n");
 
             auto It = VFI.RRs.find(VLI.InductionVariable);
             if (It == VFI.RRs.end()) {
@@ -930,7 +957,7 @@ void ModuleInterpreter::tripCount() {
                                 for (unsigned succ_idx = 0; succ_idx < BR->getNumSuccessors(); succ_idx++) {
                                     if (isLoopExit(L, BR->getSuccessor(succ_idx))) {
                                         auto cmp = BR->getCondition();
-                                        LLVM_DEBUG(tda::log() << " l'istruzione di uscita è " << cmp->getName() << "\n");
+                                        // LLVM_DEBUG(tda::log() << " l'istruzione di uscita è " << cmp->getName() << "\n");
                                         VLI.exitCmp = dyn_cast<CmpInst>(cmp);
                                     }
                                 }
@@ -964,7 +991,7 @@ void ModuleInterpreter::tripCount() {
 
                 auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
                 auto InvariantRange = GStore->fetchRange(invariantOp);
-                LLVM_DEBUG(tda::log() << " recuperato invariante " << invariantOp->getName() << " il cui range è "<<InvariantRange->toString()<<"\n");
+                //LLVM_DEBUG(tda::log() << " recuperato invariante " << invariantOp->getName() << " il cui range è "<<InvariantRange->toString()<<"\n");
 
                 if ((isLT || isLE) && Step->min > 0.0) {
                     const double num = InvariantRange->max - Start->min;
@@ -987,7 +1014,8 @@ void ModuleInterpreter::tripCount() {
                 if (computed) {
                     VLI.TripCount = TripC;
                     VLI.Reason = TripCountReason::HeuristicFallback;
-                    LLVM_DEBUG(tda::log() << "trip count (affine growth) = " << TripC << "\n");
+                    LLVM_DEBUG(tda::log() << "trip count for loop " << VLI.L->getName() << " (affine growth) = " << TripC << "\n");
+                    solvedTC++;
                 }
             }
 
@@ -996,6 +1024,87 @@ void ModuleInterpreter::tripCount() {
     }
 }
 
+//==================================================================================================
+//======================= PROPAGATE METHODS ========================================================
+//==================================================================================================
 
+void ModuleInterpreter::walk(llvm::Loop* L) {
+
+    VRAFunctionInfo& VFI = FNs[curFn.back()];
+    llvm::SmallVector<llvm::BasicBlock *> curFlow = L && FNs[curFn.back()].loops.count(L) ? FNs[curFn.back()].loops[L].bbFlow : FNs[curFn.back()].bbFlow;
+    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
+
+
+    for (auto it = curFlow.begin(); it != curFlow.end(); ++it) {
+        const llvm::BasicBlock *curBlock = *it;
+        llvm::Loop* curLoop = VFI.LI->getLoopFor(curBlock);
+
+        if (!L && curLoop && curBlock == curLoop->getHeader() || L && curBlock == curLoop->getHeader() && L != curLoop) {
+            walk(curLoop);
+            continue;
+        }
+
+        LLVM_DEBUG({
+            auto &dbg = tda::log();
+            dbg << "\nPropagation over the function " << curFn.back()->getName();
+            if (curLoop)
+                dbg << ", loop " << curLoop->getName();
+            dbg << ", block " << curBlock->getName() << " \n----------------------------------\n";
+        });
+    
+        auto CAIt = VFI.scope.BBAnalyzers.find(curBlock);
+        assert(CAIt != VFI.scope.BBAnalyzers.end());
+        std::shared_ptr<CodeAnalyzer> CurAnalyzer = CAIt->second;
+
+        for (const llvm::Instruction& CI : *curBlock) {
+            llvm::Instruction &I = const_cast<llvm::Instruction &>(CI);
+
+            auto OldRange = GStore->fetchRange(&I);
+            bool isRangeChanged = false;
+
+            // caso ricorrenza (conosciuta o non)
+            if (FNs[curFn.back()].RRs.count(&I) && curLoop) {
+                VRARecurrenceInfo& VRI = FNs[curFn.back()].RRs[&I];
+                if (!VRI.RR) continue;
+                CurAnalyzer->resolveRecurrence(VRI, FNs[curFn.back()].loops[curLoop].TripCount, isRangeChanged);
+            } else if (CurAnalyzer->requiresInterpretation(&I)) {
+                resolveCall(CurAnalyzer, &I, isRangeChanged);
+            } else {
+                CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
+            }
+
+            if (isRangeChanged) {
+                LLVM_DEBUG(tda::log() << " INSTRUCTION " << I.getName() << ": RANGE CHANGED\n");
+                propagationChanging++;
+            } 
+        }
+        
+        const llvm::BasicBlock *nextBlock = nullptr;
+        auto nextIt = std::next(it);
+        if (nextIt != curFlow.end())
+            updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt, curFn.back());
+        
+        GStore->convexMerge(*CurAnalyzer);
+    }
+
+}
+
+void ModuleInterpreter::propagateFunction(llvm::Function* F) {
+
+    VRAFunctionInfo& VFI = FNs[F];
+    curFn.push_back(F);
+
+    //scorriamo i bb della function, i suoi loop e le called. Se troviamo una root di RR lanciamola risolvendo la ricorrenza.
+    walk();
+
+    curFn.pop_back();
+}
+
+void ModuleInterpreter::propagate() {
+    curFn.clear();
+    propagationChanging = 0;
+    propagateFunction(EntryFn);
+
+}
 
 }   // end of namespace taffo

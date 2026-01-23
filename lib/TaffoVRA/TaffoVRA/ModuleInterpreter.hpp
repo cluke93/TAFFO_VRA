@@ -82,7 +82,7 @@ struct VRAFunctionInfo {
     FunctionScope scope;
 
     std::shared_ptr<Range> lastRange;
-    llvm::DenseMap<llvm::Argument*, Range> lastRangeArgs;
+    llvm::DenseMap<llvm::Value*, std::shared_ptr<Range>> lastRangeArgs;
 
     llvm::DominatorTree* DT;
     llvm::LoopInfo* LI;
@@ -125,6 +125,9 @@ public:
 
     void interpret();
 
+    // method to embed fixed-point loop and avoid recall preseed and inspect
+    void resolve();
+
     ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, std::shared_ptr<AnalysisStore> GlobalStore);
 
 protected:
@@ -134,6 +137,7 @@ protected:
     void interpretFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore = nullptr);
     FollowingPathResponse followPath(VRAFunctionInfo info, llvm::BasicBlock* src, llvm::BasicBlock* dst, llvm::SmallVector<llvm::Loop*> nesting) const;
     void interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I);
+    
     void updateSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx);
 
     // 2) INSPECTION PHASE METHODS
@@ -142,6 +146,10 @@ protected:
     void handlePHIChain(VRAFunctionInfo VFI, llvm::Loop* L, const llvm::PHINode* PHI, VRARecurrenceInfo& VRI);
     void handleStoreChain(VRAFunctionInfo VFI, llvm::Loop* L, const llvm::StoreInst* Store, VRARecurrenceInfo& VRI);
 
+    // LATTEX - RESOLUTION METHODS
+    void resolveFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore = nullptr);
+    void resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged);
+    
     // 3) ASSEMBLING METHODS
     void assemble();
 
@@ -168,7 +176,8 @@ protected:
 
     // 5) PROPAGATION METHODS
     void propagate();
-
+    void propagateFunction(llvm::Function* F);
+    void walk(llvm::Loop* L = nullptr);
 
 
 
@@ -197,9 +206,12 @@ private:
     llvm::SmallVector<llvm::Function*, 4U> curFn;    //current function scope
     llvm::ModuleAnalysisManager& MAM;
 
+    llvm::Function* EntryFn = nullptr;
     llvm::DenseMap<llvm::Function*, VRAFunctionInfo> FNs;
 
     llvm::SmallVector<const llvm::Value*> solvedRR;
+    u_int16_t solvedTC;
+    u_int64_t propagationChanging;
 
 };
 

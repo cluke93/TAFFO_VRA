@@ -35,12 +35,18 @@ public:
 
   std::shared_ptr<CILogger> getLogger() const override { return Logger; }
   std::shared_ptr<CodeAnalyzer> clone() override;
-  void analyzeInstruction(llvm::Instruction* I) override;
+  void analyzeInstruction(llvm::Instruction* I, bool& isRangeChanged) override;
   void analyzePHIStartInstruction(llvm::Instruction* I) override;
+  void resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, bool& isRangeChanged) override;
   void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) override;
   bool requiresInterpretation(llvm::Instruction* I) const override;
-  void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
-  void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
+  void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) override;
+  void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) override;
+
+  void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) override;
+  void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) override;
+
+  std::shared_ptr<Range>getRange(const std::shared_ptr<ValueInfo> Range);
 
   static bool classof(const AnalysisStore* AS) { return AS->getKind() == ASK_VRAnalyzer; }
 
@@ -67,17 +73,17 @@ private:
   void handleMallocCall(const llvm::CallBase* CB);
   bool detectAndHandleLibOMPCall(const llvm::CallBase* CB);
 
-  void handleReturn(const llvm::Instruction* ret);
+  void handleReturn(const llvm::Instruction* ret, bool& isRangeChanged);
 
-  void handleAllocaInstr(llvm::Instruction* I);
-  void handleStoreInstr(const llvm::Instruction* store);
-  void handleLoadInstr(llvm::Instruction* load);
-  void handleGEPInstr(const llvm::Instruction* gep);
-  void handleBitCastInstr(llvm::Instruction* I);
+  void handleAllocaInstr(llvm::Instruction* I, bool& isRangeChanged);
+  void handleStoreInstr(const llvm::Instruction* store, bool& isRangeChanged);
+  void handleLoadInstr(llvm::Instruction* load, bool& isRangeChanged);
+  void handleGEPInstr(const llvm::Instruction* gep, bool& isRangeChanged);
+  void handleBitCastInstr(llvm::Instruction* I, bool& isRangeChanged);
 
-  void handleCmpInstr(const llvm::Instruction* cmp);
-  void handlePhiNode(const llvm::Instruction* phi);
-  void handleSelect(const llvm::Instruction* i);
+  void handleCmpInstr(const llvm::Instruction* cmp, bool& isRangeChanged);
+  void handlePhiNode(const llvm::Instruction* phi, bool& isRangeChanged);
+  void handleSelect(const llvm::Instruction* i, bool& isRangeChanged);
 
   // Data handling
   using VRAStore::fetchRange;
