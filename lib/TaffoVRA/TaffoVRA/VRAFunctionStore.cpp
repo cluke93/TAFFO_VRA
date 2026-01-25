@@ -41,6 +41,7 @@ void VRAFunctionStore::setRetVal(std::shared_ptr<ValueInfo> RetVal) {
   if (std::shared_ptr<ValueInfoWithRange> RetRange = std::dynamic_ptr_cast<ValueInfoWithRange>(RetVal)) {
     std::shared_ptr<ValueInfoWithRange> ReturnRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(ReturnValue);
     ReturnValue = getUnionRange(ReturnRange, RetRange);
+    auto s = std::dynamic_ptr_cast<ScalarInfo>(ReturnValue);
   }
   else {
     ReturnValue = RetVal;
@@ -59,4 +60,29 @@ void VRAFunctionStore::setArgumentRanges(const llvm::Function& F,
       setNode(&formal_arg, *derived_info_it);
     ++derived_info_it;
   }
+}
+
+std::shared_ptr<VRAFunctionStore> VRAFunctionStore::deepClone() const {
+  auto clone = std::make_shared<VRAFunctionStore>(Logger);
+
+  llvm::DenseMap<const ValueInfo*, std::shared_ptr<ValueInfo>> cache;
+  cache.reserve(DerivedRanges.size() + (ReturnValue ? 1 : 0));
+
+  const auto cloneValue = [&](const std::shared_ptr<ValueInfo>& src) -> std::shared_ptr<ValueInfo> {
+    if (!src)
+      return nullptr;
+    if (const auto it = cache.find(src.get()); it != cache.end())
+      return it->second;
+    auto copy = src->clone<ValueInfo>();
+    cache[src.get()] = copy;
+    return copy;
+  };
+
+  clone->DerivedRanges.reserve(DerivedRanges.size());
+  for (const auto& [value, info] : DerivedRanges)
+    clone->DerivedRanges[value] = cloneValue(info);
+
+  clone->ReturnValue = cloneValue(ReturnValue);
+
+  return clone;
 }

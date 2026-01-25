@@ -5,6 +5,7 @@
 #include "VRAGlobalStore.hpp"
 #include "VRAnalyzer.hpp"
 
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Analysis/IVDescriptors.h>
 #include <llvm/Analysis/ScalarEvolutionExpressions.h>
@@ -59,32 +60,160 @@ static const Value* getBaseMemoryObject(const Value* Ptr) {
     return Base->stripPointerCasts();
 }
 
+static const Value* getIndexOperand(const Value *Ptr) {
+    Ptr = Ptr ? Ptr->stripPointerCasts() : nullptr;
+    const auto *GEP = dyn_cast_or_null<GEPOperator>(Ptr);
+    if (!GEP) return nullptr;
+    if (GEP->getNumOperands() < 2) return nullptr;
+    return GEP->getOperand(GEP->getNumOperands() - 1);
+};
+
+static const Value* stripCasts(const Value *V) {
+    const Value *Cur = V;
+    while (Cur) {
+        if (auto *Cast = dyn_cast<CastInst>(Cur)) {
+            Cur = Cast->getOperand(0);
+            continue;
+        }
+        if (auto *CE = dyn_cast<ConstantExpr>(Cur)) {
+            if (CE->isCast()) {
+                Cur = CE->getOperand(0);
+                continue;
+            }
+        }
+        break;
+    }
+    return Cur;
+};
+
+static void printValueName(llvm::raw_ostream &OS, const llvm::Value *V) {
+    if (!V) return;
+    if (!V->getName().empty()) {
+        OS << V->getName();
+    } else {
+        V->printAsOperand(OS, false);
+    }
+}
+
+static void printBaseOp(llvm::raw_ostream &OS, const llvm::Value *Ptr) {
+    const llvm::Value *Base = getBaseMemoryObject(Ptr);
+    if (Base) {
+        printValueName(OS, Base);
+    } else {
+        OS << "<unknown>";
+    }
+}
+
+static void printValue(llvm::raw_ostream &OS, const llvm::Value *V) {
+    if (!V) return;
+
+    if (const auto *SI = llvm::dyn_cast<llvm::StoreInst>(V)) {
+        OS << "store(";
+        printBaseOp(OS, SI->getPointerOperand());
+        OS << ")";
+        return;
+    }
+
+    if (const auto *LI = llvm::dyn_cast<llvm::LoadInst>(V)) {
+        OS << "load(";
+        printBaseOp(OS, LI->getPointerOperand());
+        OS << ")";
+        return;
+    }
+
+    printValueName(OS, V);
+}
+
+static std::string printInstrName(const llvm::Value *V) {
+    std::string S;
+    llvm::raw_string_ostream OS(S);
+    printValue(OS, V);
+    return OS.str();
+}
+
+static const llvm::Value * getInductionFromLoad(const llvm::LoadInst *LI, const llvm::LoopInfo *LIInfo) {
+  if (!LIInfo) return nullptr;
+
+  const llvm::Loop *Loop = LIInfo->getLoopFor(LI->getParent());
+  if (!Loop) return nullptr;
+  const llvm::BasicBlock *Header = Loop->getHeader();
+
+  const llvm::Value *Ptr = LI->getPointerOperand();
+
+  const auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(Ptr);
+  if (!GEP) return nullptr;
+
+  // ultimo indice (array 1D classico)
+  const llvm::Value *Idx = GEP->getOperand(GEP->getNumOperands() - 1);
+
+  llvm::SmallPtrSet<const llvm::Value *, 8> Visited;
+  while (Idx && !Visited.contains(Idx)) {
+    Visited.insert(Idx);
+
+    if (const auto *PN = llvm::dyn_cast<llvm::PHINode>(Idx)) {
+      if (PN->getParent() == Header)
+        return PN; // induction phi in loop header
+      break; // phi elsewhere, not the induction we want
+    }
+
+    if (const auto *CI = llvm::dyn_cast<llvm::CastInst>(Idx)) {
+      Idx = CI->getOperand(0);
+      continue;
+    }
+
+    if (const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(Idx)) {
+      const llvm::Value *Op0 = BO->getOperand(0);
+      const llvm::Value *Op1 = BO->getOperand(1);
+      // Prefer a PHI if present, otherwise drop constants quickly.
+      if (llvm::isa<llvm::PHINode>(Op0)) return Op0;
+      if (llvm::isa<llvm::PHINode>(Op1)) return Op1;
+      Idx = llvm::isa<llvm::Constant>(Op0) ? Op1 : Op0;
+      continue;
+    }
+
+    if (const auto *SI = llvm::dyn_cast<llvm::SelectInst>(Idx)) {
+      const llvm::Value *T = SI->getTrueValue();
+      const llvm::Value *F = SI->getFalseValue();
+      if (llvm::isa<llvm::PHINode>(T)) return T;
+      if (llvm::isa<llvm::PHINode>(F)) return F;
+      Idx = llvm::isa<llvm::Constant>(T) ? F : T;
+      continue;
+    }
+
+    if (const auto *GEPIdx = llvm::dyn_cast<llvm::GetElementPtrInst>(Idx)) {
+      Idx = GEPIdx->getOperand(GEPIdx->getNumOperands() - 1);
+      continue;
+    }
+
+    break; // give up if we cannot reach a phi
+  }
+
+  return nullptr;
+}
+
+
 std::shared_ptr<AnalysisStore> ModuleInterpreter::getStoreForValue(const llvm::Value* V) const {
     assert(V && "Trying to get AnalysisStore for null value.");
 
     if (llvm::isa<llvm::Constant>(V))
         return GlobalStore;
 
-    if (llvm::isa<llvm::Argument>(V)) {
+    for (auto [F, info] : FNs) {
+        if (llvm::isa<llvm::Argument>(V) && info.scope.FunctionStore->hasValue(V)) return info.scope.FunctionStore;
 
-        for (auto [F, VFI] : FNs) {
-            if (VFI.scope.FunctionStore->hasValue(V)) return VFI.scope.FunctionStore;
+        if (const llvm::Instruction* I = llvm::dyn_cast<llvm::Instruction>(V)) {
 
-            if (const llvm::Instruction* I = llvm::dyn_cast<llvm::Instruction>(V)) {
-
-                auto BBAIt = VFI.scope.BBAnalyzers.find(I->getParent());
-                if (BBAIt != VFI.scope.BBAnalyzers.end() && BBAIt->second->hasValue(I)) return BBAIt->second;
-            }
+            auto BBAIt = info.scope.BBAnalyzers.find(I->getParent());
+            if (BBAIt != info.scope.BBAnalyzers.end() && BBAIt->second->hasValue(I)) return BBAIt->second;
         }
     }
+    
     return nullptr;
 }
 
 ModuleInterpreter::ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, std::shared_ptr<AnalysisStore> GlobalStore): 
     M(M), GlobalStore(GlobalStore), curFn(), MAM(MAM), FNs() {
         auto GS = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
-        if (GS)
-            OriginalGlobalStore = GS->deepClone();
 }
 
 void ModuleInterpreter::interpret() {
@@ -136,6 +265,14 @@ void ModuleInterpreter::resolve() {
             break;
         }
     } while (propagationChanging != 0);
+
+    // final convex into the globals for all functions and blocks
+    for (auto [F,VFI] : FNs) {
+        for (auto [_, BBA] : VFI.scope.BBAnalyzers) {
+            GlobalStore->convexMerge(*BBA);
+        }
+        GlobalStore->convexMerge(*VFI.scope.FunctionStore);
+    }
 }
 
 //==================================================================================================
@@ -157,6 +294,10 @@ void ModuleInterpreter::preSeed() {
 
 }
 
+/**
+ * Before enetering we can consider scopes at state S0: globals and annotation from TAFFO
+ * At the end of preseed we have all functions and block scopes at state S1
+ */
 void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore) {
 
 
@@ -192,9 +333,13 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
 
         for (llvm::Instruction& I : *curBlock) {
             if (CurAnalyzer->requiresInterpretation(&I)) {
-                interpretCall(CurAnalyzer, &I);
+                interpretCall(CurAnalyzer, &I, isRangeChanged);
             } else {
-                CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
+                if (!curLoop.empty() && isa<PHINode>(&I) && curBlock == VFI.LI->getLoopFor(curBlock)->getHeader()) {
+                    CurAnalyzer->analyzePHIStartInstruction(&I, isRangeChanged);
+                } else {
+                    CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
+                }
             }
         }
 
@@ -263,16 +408,16 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
 
             updateSuccessorAnalyzer(CurAnalyzer, Term, NS);
         }
-        GlobalStore->convexMerge(*CurAnalyzer);
+        //GlobalStore->convexMerge(*CurAnalyzer);
     }
-    GlobalStore->convexMerge(*FunctionStore);
+    //GlobalStore->convexMerge(*FunctionStore);
     curFn.pop_back();
 }
 
 FollowingPathResponse ModuleInterpreter::followPath(VRAFunctionInfo info, llvm::BasicBlock* src, llvm::BasicBlock* dst, llvm::SmallVector<llvm::Loop*> nesting) const {
 
-    llvm::Loop* srcLoop = info.LI->getLoopFor(src);
-    llvm::Loop* dstLoop = info.LI->getLoopFor(dst);
+    llvm::Loop* srcLoop = info.LI ? info.LI->getLoopFor(src) : nullptr;
+    llvm::Loop* dstLoop = info.LI ? info.LI->getLoopFor(dst) : nullptr;
 
     if (srcLoop && isLoopExit(srcLoop, dst)) return FollowingPathResponse::NO_ENQUE;
 
@@ -283,7 +428,7 @@ FollowingPathResponse ModuleInterpreter::followPath(VRAFunctionInfo info, llvm::
     for (BasicBlock* pred : predecessors(dst)) {
 
         // do not analyze header predecessors if latch
-        llvm::Loop* predLoop = info.LI->getLoopFor(pred);
+        llvm::Loop* predLoop = info.LI ? info.LI->getLoopFor(pred) : nullptr;
         if (predLoop && isLoopLatch(predLoop, pred) && dst == predLoop->getHeader()) continue;
         if (dstLoop && predLoop == dstLoop->getParentLoop() && dstLoop->getHeader() == dst) continue;               // blocco prima del loop più esterno per forza visitato
 
@@ -340,8 +485,8 @@ void ModuleInterpreter::updateSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> Cu
     CurrentAnalyzer->setPathLocalInfo(SuccAnalyzer, TermInstr, SuccIdx);
 }
 
-void ModuleInterpreter::updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F) {
-    llvm::DenseMap<llvm::BasicBlock*, std::shared_ptr<CodeAnalyzer>>& BBAnalyzers = FNs[F].scope.BBAnalyzers;
+void ModuleInterpreter::updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F, FunctionScope& FS) {
+    llvm::DenseMap<llvm::BasicBlock*, std::shared_ptr<CodeAnalyzer>>& BBAnalyzers = FS.BBAnalyzers;
     std::shared_ptr<CodeAnalyzer> SuccAnalyzer;
     auto SAIt = BBAnalyzers.find(nextBlock);
     if (SAIt == BBAnalyzers.end()) {
@@ -354,7 +499,7 @@ void ModuleInterpreter::updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyze
     }
 }
 
-void ModuleInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I) {
+void ModuleInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged) {
     llvm::CallBase* CB = llvm::cast<llvm::CallBase>(I);
     llvm::Function* F = CB->getCalledFunction();
     if (!F || F->empty())
@@ -362,9 +507,9 @@ void ModuleInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer,
 
     std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFnStore(*this);
 
-    CurAnalyzer->prepareForCall(I, FunctionStore, FNs[F]);
+    CurAnalyzer->prepareForCall(I, FunctionStore, FNs[F], isRangeChanged);
     interpretFunction(F, FunctionStore);
-    CurAnalyzer->returnFromCall(I, FunctionStore, FNs[F]);
+    CurAnalyzer->returnFromCall(I, FunctionStore, FNs[F], isRangeChanged);
 }
 
 void ModuleInterpreter::resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged) {
@@ -373,16 +518,22 @@ void ModuleInterpreter::resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, l
     if (!F || F->empty())
         return;
 
+    // Reuse the already-built function store so we can retrieve the return value
+    // computed during propagation. Creating a fresh store here loses the ranges
+    // set by VRAnalyzer::handleReturn, which is why the call appeared to
+    // "return nothing" in the logs.
     std::shared_ptr<AnalysisStore> FunctionStore = FNs[F].scope.FunctionStore;
+    if (!FunctionStore)
+      FunctionStore = GlobalStore->newFnStore(*this);
 
     CurAnalyzer->prepareForCallPropagation(I, FunctionStore, isRangeChanged, FNs[F]);
-    if (isRangeChanged) {
+    if (isRangeChanged) { LLVM_DEBUG(tda::log() << " (GG) ");
         propagateFunction(F);
-        CurAnalyzer->returnFromCallPropagation(I, FunctionStore, isRangeChanged, FNs[F]);
     } else {
         LLVM_DEBUG(tda::log() << "No arguments are widen, can reuse past range\n");
     }
-
+LLVM_DEBUG(tda::log() << " (HH) ");
+    CurAnalyzer->returnFromCallPropagation(I, FunctionStore, isRangeChanged, FNs[F]);
 }
 
 
@@ -532,26 +683,29 @@ void ModuleInterpreter::handleStoreChain(VRAFunctionInfo VFI, Loop* L, const Sto
     const Value* StoreValue = Store->getValueOperand();
     const Value* StoreBase = getBaseMemoryObject(Store->getPointerOperand());
     if (!StoreBase || !StoreValue) return;
-
+    
     bool couldBeInit = false;
     SmallVector<const Value*, 32> worklist;
     DenseMap<const Value*, const Value*> preds;
+    DenseSet<const Value*> visited;
+
     auto enqueue = [&](const Value *from, const Value *to) {
-        if (preds.contains(to)) return;
+        if (visited.contains(to) || preds.contains(to)) return;
         preds[to] = from;
         worklist.push_back(to);
     };
-
-    preds[Store] = nullptr;
+    
+    preds[StoreValue] = nullptr; // root of the back-trace
     worklist.push_back(StoreValue);
 
     while (!worklist.empty()) {
         const Value *cur = worklist.pop_back_val();
+        if (!visited.insert(cur).second) continue;
 
-        if (auto Load = dyn_cast<LoadInst>(cur)) {
+        if (auto *Load = dyn_cast<LoadInst>(cur)) {
+
             const Value* LoadBase = getBaseMemoryObject(Load->getPointerOperand());
             if (StoreBase == LoadBase) {
-
                 SmallVector<const Value*, 32> Rev;
                 VRI.chain.clear();
 
@@ -570,30 +724,27 @@ void ModuleInterpreter::handleStoreChain(VRAFunctionInfo VFI, Loop* L, const Sto
                 }
                 
                 VRI.kind = VRAInspectionKind::REC; // ring found
+                VRI.loadJunction = Load;
 
                 LLVM_DEBUG(tda::log() << "FOUND REC: " << VRI.chainToString());
                 return;
             }
 
             couldBeInit = true;
-            continue;   // useless follow again load users
+            continue;   // load from a different base: treat as init candidate
         }
 
-        if (auto callInstr = dyn_cast<CallInst>(cur)) {
+        if (auto *callInstr = dyn_cast<CallInst>(cur)) {
             Type *retTy = callInstr->getType();
             couldBeInit = !retTy->isVoidTy();
-            continue;
+            continue; // stop: call result is a source
         }
 
-        for (const User *U : cur->users()) {
-            auto *I = dyn_cast<Instruction>(U);
-            if (!I) continue;
-
-            // list of plausible instruction which can continue the flow
-            if (isa<LoadInst>(I) || isa<CastInst>(I) || isa<BinaryOperator>(I) || isa<CallInst>(I) || VFI.RRs.count(I)) {
-                LLVM_DEBUG(tda::log() << " equeuing: "<<U->getName() << " from: " << I->getName() << " || ");
-                enqueue(cur, I);
-                continue;
+        // Walk backwards through operands to reach defining loads.
+        if (auto *I = dyn_cast<Instruction>(cur)) {
+            for (const Value *Op : I->operands()) {
+                if (isa<Constant>(Op)) continue;
+                enqueue(cur, Op);
             }
         }
     }
@@ -607,46 +758,18 @@ void ModuleInterpreter::handleStoreChain(VRAFunctionInfo VFI, Loop* L, const Sto
     }
 }
 
+
 std::string VRARecurrenceInfo::chainToString() {
     std::string S;
     llvm::raw_string_ostream OS(S);
-    
-    auto printValueName = [&](const llvm::Value *V) {
-        if (!V) return;
-        if (!V->getName().empty()) { OS << V->getName(); }
-        else { V->printAsOperand(OS, false); }
-    };
-
-    auto printBaseOp = [&](const llvm::Value *Ptr) {
-        const llvm::Value *Base = getBaseMemoryObject(Ptr);
-        if (Base) { printValueName(Base); }
-        else { OS << "<unknown>"; }
-    };
-
-    auto printValue = [&](const llvm::Value *V) {
-        if (!V) return;
-        if (const auto *SI = llvm::dyn_cast<llvm::StoreInst>(V)) {
-            OS << "store(";
-            printBaseOp(SI->getPointerOperand());
-            OS << ")";
-            return;
-        }
-        if (const auto *LI = llvm::dyn_cast<llvm::LoadInst>(V)) {
-            OS << "load(";
-            printBaseOp(LI->getPointerOperand());
-            OS << ")";
-            return;
-        }
-        printValueName(V);
-    };
 
     OS << "  flow: ";
-    printValue(root);
+    printValue(OS, root);
     OS << " => ";
 
     for (unsigned i = 0; i < chain.size(); ++i) {
         const llvm::Value* V = chain[i];
-        printValue(V);
+        printValue(OS, V);
 
         if (i + 1 < chain.size())
         OS << " => ";
@@ -654,7 +777,7 @@ std::string VRARecurrenceInfo::chainToString() {
 
     if (kind == VRAInspectionKind::REC) {
         OS << " => ";
-        printValueName(root);
+        printValueName(OS, root);
         OS << " || RECURRENCE";
     } else if (kind == VRAInspectionKind::INIT) {
         OS << " || INITIALIZATION";
@@ -678,22 +801,19 @@ void ModuleInterpreter::assemble() {
         llvm::Function *F = Entry.first;
         auto &VFI = Entry.second;
 
-
         for (auto &RREntry : VFI.RRs) {
             const llvm::Value* root = RREntry.first;
             auto &VRI = RREntry.second;
 
             if (VRI.RR) continue;   //already solved
 
-            LLVM_DEBUG(tda::log() << "[VRA] >> [ASSEMBLE] >> FN["<<F->getName()<<"] - Recognization of " << root->getName() << "\n");
+            LLVM_DEBUG(tda::log() << "[VRA] >> [ASSEMBLE] >> FN["<<F->getName()<<"] - Recognization of " << printInstrName(root) << "\n");
 
             if (isUnknownRecurrence(VRI)) {
-
-                solvedRR.push_back(root);
                 continue;
-
             } else if (isAffineRecurrence(VRI)) {
-                solvedRR.push_back(root);
+                continue;
+            } else if(isInitRecurrence(VRI)) {
                 continue;
             }
 
@@ -707,15 +827,14 @@ void ModuleInterpreter::assemble() {
 
 bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI) {
     if (!V || !L) return false;
-
-    if (V == VRI.root) return true;
-
-    auto I = dyn_cast<Instruction>(V);
-    if (!I) return false;
+    if (V == VRI.root || isa<Constant>(V)) return true;
+    
+    const auto *I = llvm::dyn_cast<llvm::Instruction>(V);
+    if (!I) return true;
     llvm::Function* F = const_cast<llvm::Function*>(I->getParent()->getParent());
     VRAFunctionInfo& VFI = FNs[F];
     VRALoopInfo& VLI = FNs[F].loops[L];
-
+    
     SmallVector<const Value*, 32> worklist;
     DenseMap<const Value*, const Value*> preds;
     auto enqueue = [&](const Value *from, const Value *to) {
@@ -726,15 +845,14 @@ bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loo
 
     preds[V] = nullptr;
     worklist.push_back(V);
-
+    
     while (!worklist.empty()) {
         const Value *cur = worklist.pop_back_val();
-
         //controllo invarianza
 
         if (auto CB = dyn_cast<CallBase>(I)) {
             // check invarianza di tutti gli argomenti
-
+            
             if (!VLI.isInvariant(I)) {
 
                 bool atLeastOneUnsolvedArg = false;
@@ -743,7 +861,7 @@ bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loo
                     if (VLI.isInvariant(ArgV))
                         continue;
 
-                    if (VFI.RRs.count(ArgV) && !VFI.RRs[ArgV].RR) {
+                    if (VFI.RRs.count(ArgV) && !VFI.RRs[ArgV].lastRange) {
                         atLeastOneUnsolvedArg = true;
                     }
                 }
@@ -762,13 +880,21 @@ bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loo
 
         else if (!VLI.isInvariant(cur)) {
 
-            if (VFI.RRs.count(cur) && VFI.RRs[cur].RR) {
-                continue;
+            if (auto Load = dyn_cast<LoadInst>(cur)) {
+                if (auto IV = getInductionFromLoad(Load, VFI.LI)) {
+                    if (VFI.RRs.count(IV) && VFI.RRs[IV].lastRange) {
+                        continue;
+                    }
+                }
+            } else {
+                if (VFI.RRs.count(cur) && VFI.RRs[cur].lastRange) {
+                    continue;
+                }
+                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(cur));
+                return false;
             }
-            VRI.depsOnRR.push_back(const_cast<llvm::Value*>(cur));
-            return false;
         }
-
+        
         for (const User *U : cur->users()) {
             auto *I = dyn_cast<Instruction>(U);
             if (!I) continue;
@@ -784,40 +910,113 @@ bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loo
     return true;
 }
 
+// Like isSolvableDependenceTree but walks operands backwards (SSA defs) instead of users.
+bool ModuleInterpreter::isSolvableDependenceTreeBackwark(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI) {
+    if (!V || !L) return false;
+    if (V == VRI.root || isa<Constant>(V)) return true;
+
+    const auto *I = llvm::dyn_cast<llvm::Instruction>(V);
+    if (!I) return true;
+
+    llvm::Function* F = const_cast<llvm::Function*>(I->getParent()->getParent());
+    VRAFunctionInfo& VFI = FNs[F];
+    VRALoopInfo& VLI = FNs[F].loops[L];
+
+    SmallVector<const Value*, 32> worklist;
+    DenseMap<const Value*, const Value*> preds;
+    DenseSet<const Value*> visited;
+
+    auto enqueue = [&](const Value *from, const Value *to) {
+        if (!to || visited.contains(to) || preds.contains(to)) return;
+        preds[to] = from;
+        worklist.push_back(to);
+    };
+
+    preds[V] = nullptr;
+    worklist.push_back(V);
+
+    while (!worklist.empty()) {
+        const Value *cur = worklist.pop_back_val();
+        if (!visited.insert(cur).second) continue;
+        LLVM_DEBUG(tda::log() << " (analyzing backward " << printInstrName(cur) << ") ");
+
+        // Invariance / solved RR checks mirror the forward version
+        if (auto CB = dyn_cast<CallBase>(cur)) {
+            if (!VLI.isInvariant(cur)) {
+                bool atLeastOneUnsolvedArg = false;
+                for (const Use &Arg : CB->args()) {
+                    const llvm::Value *ArgV = Arg.get();
+                    if (VLI.isInvariant(ArgV)) continue;
+                    if (VFI.RRs.count(ArgV) && !VFI.RRs[ArgV].lastRange)
+                        atLeastOneUnsolvedArg = true;
+                }
+                if (atLeastOneUnsolvedArg) {
+                    VRI.depsOnFn.push_back(CB->getCalledFunction());
+                    return false;
+                }
+                VRI.depsOnFn.clear();
+            }
+        }
+        else if (!VLI.isInvariant(cur)) {
+            if (auto Load = dyn_cast<LoadInst>(cur)) { 
+                auto IV = getInductionFromLoad(Load, VFI.LI); 
+                LLVM_DEBUG(if (IV) tda::log() << " (IV: "<<IV->getName()<<") ");
+                if (VFI.RRs.count(IV) && VFI.RRs[IV].lastRange) {
+
+                    // if idx solved check base
+                    const Value *LoadBase = getBaseMemoryObject(Load->getPointerOperand());
+                    if (LoadBase) {
+                        for (auto [R, RR] : VFI.RRs) {
+                            const auto *RootStore = dyn_cast<StoreInst>(R);
+                            if (!RootStore || R == VRI.root) continue;
+
+                            const Value *RootBase = getBaseMemoryObject(RootStore->getPointerOperand());
+                            if (RootBase != LoadBase) continue;
+                            if (!RR.lastRange) {
+                                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(R));
+                                LLVM_DEBUG(tda::log() << " dep on past store unsolved ");
+                                return false;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            } else {
+                if (VFI.RRs.count(cur) && VFI.RRs[cur].lastRange)
+                    continue;
+                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(cur));
+                return false;
+            }
+        }
+        
+        if (auto *Inst = dyn_cast<Instruction>(cur)) {
+            for (const Value *Op : Inst->operands()) {
+                if (isa<Constant>(Op)) continue;
+                enqueue(cur, Op);
+            }
+        }
+    }
+
+    return true;
+}
+
 bool ModuleInterpreter::isUnknownRecurrence(VRARecurrenceInfo& VRI) {
     if (VRI.kind != VRAInspectionKind::UNKNOWN) return false;
     LLVM_DEBUG(tda::log() << "\t\ttry to recognize as unknown recurrence... \n");
 
-    // se lo start è loopInvariant usalo e bona
-    // se è loop variant controlla se è stato risolto
-    // se non è stato risolto aspetta e aggiungi dipendenza
+    const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
+    llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
+    VRAFunctionInfo &VFI = FNs[F];
+    llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
 
-    // Cerca prima nello scope della funzione, poi nel global
-
-    auto AStore = getStoreForValue(VRI.root);
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
-    std::shared_ptr<Range> StartRange;
-
-    // // usa il global
-    // if (AStore) {
-    //     if (AStore->getKind() == AnalysisStore::AnalysisStoreKind::ASK_VRAFunctionStore) {
-    //         auto Store = std::static_pointer_cast<VRAFunctionStore>(AStore);
-    //         StartRange = Store->fetchRange(VRI.root);
-    //     }
-    //     if (AStore->getKind() == AnalysisStore::AnalysisStoreKind::ASK_VRAnalyzer) {
-    //         auto Store = std::static_pointer_cast<VRAnalyzer>(AStore);
-    //         StartRange = Store->fetchRange(VRI.root);
-    //     }
-    // } else {
-        StartRange = GStore->fetchRange(VRI.root);
-    //}
-
-    if (!StartRange) StartRange = Range::Top().clone();
-
-    auto StepRange = Range::Top().clone();
-
-    LLVM_DEBUG(tda::log() << "\t\t\trecognized unknown(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
-    VRI.RR = std::make_shared<FakeRangedRecurrence>(StartRange->clone(), StepRange->clone());
+    if (auto *latch = L->getLoopLatch()) {
+        auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+        std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildUnknownRecurrence(VRI.root);
+        if (RR) {
+            VRI.RR = RR;
+            solvedRR.push_back(VRI.root);
+        }
+    }
     return true;
 }
 
@@ -848,69 +1047,230 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
     llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
     VRALoopInfo &VLI = VFI.loops[L];
     
-    bool isSolvable = VRI.chain.size() > 0;
-    for (const auto* RRNode : VRI.chain) {
-        if (!isAffineBinaryOp(RRNode)) return false;
-        const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+    if (const auto *PN = llvm::dyn_cast<llvm::PHINode>(VRI.root)) {
 
-        isSolvable &= isSolvableDependenceTree(BO->getOperand(0), L, VRI) && isSolvableDependenceTree(BO->getOperand(1), L, VRI);
-    }
-    
-    // run every block of the current loop
-    for (auto it = VLI.bbFlow.begin(); it != VLI.bbFlow.end(); ++it) {
-        const llvm::BasicBlock *curBlock = *it;
-        LLVM_DEBUG(tda::log() << "\nAnalysing block " << curBlock->getName() << " \n----------------------------------\n");
-        
-        auto CAIt = VFI.scope.BBAnalyzers.find(curBlock);
-        assert(CAIt != VFI.scope.BBAnalyzers.end());
-        std::shared_ptr<CodeAnalyzer> CurAnalyzer = CAIt->second;
+        bool isSolvable = VRI.chain.size() > 0;
+        for (const auto* RRNode : VRI.chain) {
+            if (!isAffineBinaryOp(RRNode)) return false;
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            isSolvable &= isSolvableDependenceTree(BO->getOperand(0), L, VRI) && isSolvableDependenceTree(BO->getOperand(1), L, VRI);
+        }
 
-        bool isRangeChanged = false;
-        if (VFI.LI->getLoopFor(curBlock) == L) {
-            for (const llvm::Instruction& CI : *curBlock) {
-                llvm::Instruction &I = const_cast<llvm::Instruction &>(CI);
-                if (CurAnalyzer->requiresInterpretation(&I)) {
-                    resolveCall(CurAnalyzer, &I, isRangeChanged);
-                } else {
-                    // if (&I == const_cast<llvm::Instruction*>(InstrRoot)) {
-                    if (isa<PHINode>(&I) && curBlock == L->getHeader()) {
-                        CurAnalyzer->analyzePHIStartInstruction(&I);
-                    } else {
-                        CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
-                    }
-                }
+        if (!isSolvable) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvale yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+
+        // Possiamo usare lo scope allo stato Sn il quale è stato già oggetto di preseeding (S1) oppure propagation (St con t num iterazioni)
+
+        if (auto *latch = L->getLoopLatch()) {
+            auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+            std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildAffinePHIRecurrence(PN);
+            if (RR) {
+                VRI.RR = RR;
+                solvedRR.push_back(VRI.root);
             }
         }
 
-        const llvm::BasicBlock *nextBlock = nullptr;
-        auto nextIt = std::next(it);
-        if (nextIt != VLI.bbFlow.end())
-            updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt, F);
+    } else if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(VRI.root)) {
+
+        bool isSolvable = VRI.chain.size() > 0;
+        for (const auto* RRNode : VRI.chain) {
+            if (!isAffineBinaryOp(RRNode)) return false;
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VRI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VRI);
+        }
+
+        if (!isSolvable) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvale yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+
+
+        const Value *StoreIdx = getIndexOperand(Store->getPointerOperand());
+        const Value *LoadIdx = getIndexOperand(VRI.loadJunction->getPointerOperand());
+
+        // check delta idx == 1
+        int64_t StoreOff = 0;
+        int64_t LoadOff = 0;
+
+
+        const Value *StoreIV = matchIVOffset(VFI, StoreIdx, StoreOff, L);
+        const Value *LoadIV = matchIVOffset(VFI, LoadIdx, LoadOff, L);
+        if (!StoreIV || !LoadIV || StoreIV != LoadIV) return false;
         
-        GStore->convexMerge(*CurAnalyzer);
-    }
-    
-    std::shared_ptr<Range> StartRange = nullptr;
-    std::shared_ptr<Range> StepRange = nullptr;
-    if (const auto *PN = llvm::dyn_cast<llvm::PHINode>(VRI.root)) {
-        StartRange = StepRange = GStore->fetchRange(VRI.root);
-        const Value *latchIncoming = nullptr;
+        const int64_t delta = StoreOff - LoadOff;
+        if (std::abs(delta) != 1) return false;
+        
+        // Possiamo usare lo scope allo stato Sn il quale è stato già oggetto di preseeding (S1) oppure propagation (St con t num iterazioni)
+
         if (auto *latch = L->getLoopLatch()) {
-            latchIncoming = PN->getIncomingValueForBlock(latch);
-            StepRange = handleSub(GStore->fetchRange(latchIncoming), StartRange);
+            auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+            std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildAffineStoreRecurrence(VRI, Store);
+            if (RR) {
+                VRI.RR = RR;
+                solvedRR.push_back(VRI.root);
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * INIT RECURRENCE HAS TYPE INIT BUT DEPENDS ON OTHER RECURRENCE
+ */
+bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
+    if (VRI.kind != VRAInspectionKind::INIT) return false;
+    LLVM_DEBUG(tda::log() << "\t\ttry to recognize as init recurrence... \n");
+
+    const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
+    llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
+    VRAFunctionInfo &VFI = FNs[F];
+    llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
+    VRALoopInfo &VLI = VFI.loops[L];
+
+    // LLVM_DEBUG(tda::log() << "-- creazione copia temp di function store -- ");
+    // FunctionScope VFS = GlobalStore->newFnStore(*this);
+    // VFS.FunctionStore = std::static_pointer_cast<VRAFunctionStore>(VFI.scope.FunctionStore)->deepClone();
+    // LLVM_DEBUG(tda::log() << "-- creazione copia temp di analyzer di "<<VLI.bbFlow.front()->getName()<<" da originale\n");
+    // VFS.BBAnalyzers[VLI.bbFlow.front()] = std::static_pointer_cast<VRAnalyzer>(VFI.scope.BBAnalyzers[VLI.bbFlow.front()])->deepClone();
+
+    
+    if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(VRI.root)) {
+
+        if (!isSolvableDependenceTree(Store->getValueOperand(), L, VRI)) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvale yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+
+        auto SFV = std::static_pointer_cast<VRAnalyzer>(getStoreForValue(Store->getValueOperand()));
+        if (!SFV) return true;
+        
+        std::shared_ptr<RangedRecurrence> RR = SFV->buildInitRecurrence(Store);
+        if (RR) {
+            VRI.RR = RR;
+            solvedRR.push_back(VRI.root);
+        }
+    }
+    return true;
+}
+
+const Value* ModuleInterpreter::matchIVOffset(VRAFunctionInfo VFI, const Value *Idx, int64_t &Offset, llvm::Loop *L) {
+    
+    Offset = 0;
+    const Value *Cur = stripCasts(Idx);
+    int64_t Acc = 0;
+    int64_t ScaleNum = 1; // numerator of the IV coefficient
+    int64_t ScaleDen = 1; // denominator of the IV coefficient
+
+    const auto getConstInt = [](const Value *V) { return dyn_cast<ConstantInt>(V); };
+    const auto mulNoOverflow = [](int64_t A, int64_t B, int64_t &Res) {
+        __int128 Prod = static_cast<__int128>(A) * static_cast<__int128>(B);
+        if (Prod > std::numeric_limits<int64_t>::max() || Prod < std::numeric_limits<int64_t>::min())
+        return false;
+        Res = static_cast<int64_t>(Prod);
+        return true;
+    };
+
+    while (true) {
+        Cur = stripCasts(Cur);
+        const auto *BO = dyn_cast<BinaryOperator>(Cur);
+        if (!BO)
+        break;
+
+        const unsigned Opc = BO->getOpcode();
+
+        if (Opc == llvm::Instruction::Add || Opc == llvm::Instruction::Sub) {
+        const ConstantInt *CI = nullptr;
+        const Value *Next = nullptr;
+
+        if ((CI = getConstInt(BO->getOperand(1)))) {
+            Next = BO->getOperand(0);
+        } else if (Opc == llvm::Instruction::Add && (CI = getConstInt(BO->getOperand(0)))) {
+            Next = BO->getOperand(1);
+        }
+
+        if (!CI)
+            break;
+
+        int64_t Delta = 0;
+        const int64_t C = CI->getSExtValue();
+        if (!mulNoOverflow(ScaleNum, (Opc == llvm::Instruction::Sub ? -C : C), Delta))
+            break;
+        Acc += Delta;
+        Cur = Next;
+        continue;
+        }
+
+        if (Opc == llvm::Instruction::Mul) {
+        const ConstantInt *CI = getConstInt(BO->getOperand(1));
+        const Value *Next = BO->getOperand(0);
+
+        if (!CI) {
+            CI = getConstInt(BO->getOperand(0));
+            Next = BO->getOperand(1);
+        }
+
+        if (!CI)
+            break;
+
+        const int64_t Factor = CI->getSExtValue();
+        if (Factor == 0)
+            break;
+
+        int64_t NewScale = 0;
+        if (!mulNoOverflow(ScaleNum, Factor, NewScale))
+            break;
+        ScaleNum = NewScale;
+        Cur = Next;
+        continue;
+        }
+
+        if (Opc == llvm::Instruction::UDiv || Opc == llvm::Instruction::SDiv) {
+        const auto *CI = getConstInt(BO->getOperand(1));
+        if (!CI)
+            break;
+
+        const int64_t Divisor = CI->getSExtValue();
+        if (Divisor == 0)
+            break;
+
+        int64_t NewAcc = 0;
+        int64_t NewDen = 0;
+        if (!mulNoOverflow(Acc, Divisor, NewAcc))
+            break;
+        if (!mulNoOverflow(ScaleDen, Divisor, NewDen))
+            break;
+
+        Acc = NewAcc;
+        ScaleDen = NewDen;
+        Cur = BO->getOperand(0);
+        continue;
+        }
+
+        break;
+    }
+
+    Cur = stripCasts(Cur);
+
+    if (ScaleDen < 0) {
+        ScaleDen = -ScaleDen;
+        ScaleNum = -ScaleNum;
+        Acc = -Acc;
+    }
+
+    if ((ScaleNum % ScaleDen) != 0 || (Acc % ScaleDen) != 0)
+        return nullptr;
+
+    if (const auto *PHI = dyn_cast<PHINode>(Cur)) {
+        if (VFI.loops[L].InductionVariable == const_cast<Value*>(Cur) && VFI.LI->getLoopFor(PHI->getParent()) == L) {
+            Offset = Acc / ScaleDen;
+            return PHI;
         }
     }
 
-    LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
-    VRI.RR = std::make_shared<AffineRangedRecurrence>(StartRange->clone(), std::move(StepRange));
-
-    // LLVM_DEBUG(tda::log() << "[VRA][assemble] stored RR for root="
-    //                   << VRI.root->getName()
-    //                   << " ptr=" << (const void*)VRI.root << "\n\n\n");
-
-
-    return true;
-}
+  return nullptr;
+};
 
 //==================================================================================================
 //======================= TRIP COUNT METHODS =======================================================
@@ -989,9 +1349,21 @@ void ModuleInterpreter::tripCount() {
                 uint64_t TripC = 0;
                 bool computed = false;
 
-                auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
-                auto InvariantRange = GStore->fetchRange(invariantOp);
-                //LLVM_DEBUG(tda::log() << " recuperato invariante " << invariantOp->getName() << " il cui range è "<<InvariantRange->toString()<<"\n");
+                auto InvariantStore = std::static_pointer_cast<VRAnalyzer>(getStoreForValue(invariantOp));
+                auto InvariantRange = InvariantStore->getBBRange(invariantOp);
+                LLVM_DEBUG(tda::log() << " recuperato invariante " << invariantOp->getName() << " il cui range è "<<InvariantRange->toString()<<"\n");
+                if (isa<Constant>(invariantOp)) {
+
+                } else {
+                    const auto *I = llvm::dyn_cast<llvm::Instruction>(invariantOp);
+                    LLVM_DEBUG(tda::log() << " (1) ");
+                    if (VFI.LI && VFI.RRs.count(I)) { LLVM_DEBUG(tda::log() << " (2) ");
+                        if (!isSolvableDependenceTree(invariantOp, VFI.LI->getLoopFor(I->getParent()), VFI.RRs[I])) { LLVM_DEBUG(tda::log() << " (3) ");
+                            continue;
+                        }
+                    }
+                }
+                
 
                 if ((isLT || isLE) && Step->min > 0.0) {
                     const double num = InvariantRange->max - Start->min;
@@ -1031,19 +1403,17 @@ void ModuleInterpreter::tripCount() {
 void ModuleInterpreter::walk(llvm::Loop* L) {
 
     VRAFunctionInfo& VFI = FNs[curFn.back()];
-    llvm::SmallVector<llvm::BasicBlock *> curFlow = L && FNs[curFn.back()].loops.count(L) ? FNs[curFn.back()].loops[L].bbFlow : FNs[curFn.back()].bbFlow;
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
-
+    llvm::SmallVector<llvm::BasicBlock *> curFlow = L && FNs[curFn.back()].loops.count(L) ? FNs[curFn.back()].loops[L].bbFlow : FNs[curFn.back()].bbFlow;   
 
     for (auto it = curFlow.begin(); it != curFlow.end(); ++it) {
         const llvm::BasicBlock *curBlock = *it;
-        llvm::Loop* curLoop = VFI.LI->getLoopFor(curBlock);
-
+        llvm::Loop* curLoop = VFI.LI ? VFI.LI->getLoopFor(curBlock) : nullptr;
+        
         if (!L && curLoop && curBlock == curLoop->getHeader() || L && curBlock == curLoop->getHeader() && L != curLoop) {
             walk(curLoop);
             continue;
         }
-
+        
         LLVM_DEBUG({
             auto &dbg = tda::log();
             dbg << "\nPropagation over the function " << curFn.back()->getName();
@@ -1059,15 +1429,22 @@ void ModuleInterpreter::walk(llvm::Loop* L) {
         for (const llvm::Instruction& CI : *curBlock) {
             llvm::Instruction &I = const_cast<llvm::Instruction &>(CI);
 
-            auto OldRange = GStore->fetchRange(&I);
             bool isRangeChanged = false;
-
             // caso ricorrenza (conosciuta o non)
             if (FNs[curFn.back()].RRs.count(&I) && curLoop) {
                 VRARecurrenceInfo& VRI = FNs[curFn.back()].RRs[&I];
-                if (!VRI.RR) continue;
-                CurAnalyzer->resolveRecurrence(VRI, FNs[curFn.back()].loops[curLoop].TripCount, isRangeChanged);
+                
+                //ricorrenza risolta al trip count X, se non è cambiato ricicla
+                if (VRI.lastRange && VRI.lastRangeComputedAt >= FNs[curFn.back()].loops[curLoop].TripCount) {
+                    CurAnalyzer->retrieveSolvedRecurrence(&I, VFI.RRs[&I], isRangeChanged);
+                } else {
+                    if (!VRI.RR) continue;
+                    CurAnalyzer->resolveRecurrence(VRI, FNs[curFn.back()].loops[curLoop].TripCount, isRangeChanged);
+                }
+
             } else if (CurAnalyzer->requiresInterpretation(&I)) {
+                // caso call: check se gli argomenti si sono espansi o serve nuova propagazione
+
                 resolveCall(CurAnalyzer, &I, isRangeChanged);
             } else {
                 CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
@@ -1082,9 +1459,7 @@ void ModuleInterpreter::walk(llvm::Loop* L) {
         const llvm::BasicBlock *nextBlock = nullptr;
         auto nextIt = std::next(it);
         if (nextIt != curFlow.end())
-            updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt, curFn.back());
-        
-        GStore->convexMerge(*CurAnalyzer);
+            updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt, curFn.back(), VFI.scope);
     }
 
 }

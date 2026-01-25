@@ -13,6 +13,7 @@ class CodeAnalyzer;
 class ModuleInterpreter;
 class VRARecurrenceInfo;
 class VRAFunctionInfo;
+class RangedRecurrence;
 
 class CILogger {
 public:
@@ -67,15 +68,21 @@ class CodeAnalyzer : public AnalysisStore {
 public:
   virtual std::shared_ptr<CodeAnalyzer> clone() = 0;
   virtual void analyzeInstruction(llvm::Instruction* I, bool& isRangeChanged) = 0;
-  virtual void analyzePHIStartInstruction(llvm::Instruction* I) = 0;
+  virtual void analyzePHIStartInstruction(llvm::Instruction* I, bool& isRangeChanged) = 0;
+  virtual void retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInfo& VRI, bool& isRangeChanged) = 0;
   virtual void resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, bool& isRangeChanged) = 0;
   virtual void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) = 0;
   virtual bool requiresInterpretation(llvm::Instruction* I) const = 0;
-  virtual void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) = 0;
-  virtual void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) = 0;
+  virtual void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI, bool& isRangeChanged) = 0;
+  virtual void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI, bool& isRangeChanged) = 0;
 
   virtual void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) = 0;
   virtual void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) = 0;
+
+  virtual std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildInitRecurrence(const llvm::StoreInst *store) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) = 0;
 
   static bool classof(const AnalysisStore* AS) {
     return AS->getKind() >= ASK_VRAGlobalStore && AS->getKind() <= ASK_VRAnalyzer;

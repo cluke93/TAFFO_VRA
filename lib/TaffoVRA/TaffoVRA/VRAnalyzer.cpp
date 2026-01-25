@@ -41,6 +41,30 @@ std::shared_ptr<AnalysisStore> VRAnalyzer::newFnStore(ModuleInterpreter& MI) {
 
 std::shared_ptr<CodeAnalyzer> VRAnalyzer::clone() { return std::make_shared<VRAnalyzer>(*this); }
 
+std::shared_ptr<VRAnalyzer> VRAnalyzer::deepClone() const {
+  auto clone = CodeInt ? std::make_shared<VRAnalyzer>(Logger, CodeInt)
+                       : std::make_shared<VRAnalyzer>(Logger, ModInt);
+
+  llvm::DenseMap<const ValueInfo*, std::shared_ptr<ValueInfo>> cache;
+  cache.reserve(DerivedRanges.size());
+
+  const auto cloneValue = [&](const std::shared_ptr<ValueInfo>& src) -> std::shared_ptr<ValueInfo> {
+    if (!src)
+      return nullptr;
+    if (const auto it = cache.find(src.get()); it != cache.end())
+      return it->second;
+    auto copy = src->clone<ValueInfo>();
+    cache[src.get()] = copy;
+    return copy;
+  };
+
+  clone->DerivedRanges.reserve(DerivedRanges.size());
+  for (const auto& [value, info] : DerivedRanges)
+    clone->DerivedRanges[value] = cloneValue(info);
+
+  return clone;
+}
+
 static bool isNewRangeWiden(const std::shared_ptr<Range> OldRange, const std::shared_ptr<Range> NewRange) {
   if (!OldRange && !NewRange) return false;
   if (!OldRange && NewRange || OldRange && !NewRange) return true;
@@ -78,6 +102,7 @@ void VRAnalyzer::analyzeInstruction(Instruction* I, bool& isRangeChanged) {
     const std::shared_ptr<Range> oldInfo = fetchRange(&i);
     const std::shared_ptr<Range> info1 = fetchRange(op1);
     const std::shared_ptr<Range> info2 = fetchRange(op2);
+    LLVM_DEBUG(tda::log() << " op1 range: " << (info1 ? info1->toString() : "null") << " op2: " << (info2 ? info2->toString() : "null"));
     const std::shared_ptr<Range> res = handleBinaryInstruction(info1, info2, OpCode);
     saveValueRange(&i, res);
 
@@ -184,7 +209,7 @@ bool VRAnalyzer::requiresInterpretation(Instruction* I) const {
   return false;
 }
 
-void VRAnalyzer::prepareForCall(Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) {
+void VRAnalyzer::prepareForCall(Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI, bool& isRangeChanged) {
   CallBase* CB = cast<CallBase>(I);
   assert(!CB->isIndirectCall());
 
@@ -197,8 +222,19 @@ void VRAnalyzer::prepareForCall(Instruction* I, std::shared_ptr<AnalysisStore> F
   // fetch ranges of arguments
   std::list<std::shared_ptr<ValueInfo>> ArgRanges;
   for (Value* Arg : CB->args()) {
-    ArgRanges.push_back(getNode(Arg));
-    VFI.lastRangeArgs.try_emplace(Arg, getRange(getNode(Arg)));
+    auto node = getNode(Arg);
+    ArgRanges.push_back(node);
+
+    // if (VFI.lastRangeArgs.count(Arg)) {
+    //   auto IncomingRange = getRange(node);
+    //   if (isNewRangeWiden(VFI.lastRangeArgs[Arg], IncomingRange)) {
+    //     isRangeChanged = true;
+    //     VFI.lastRangeArgs[Arg] = IncomingRange;
+    //   }
+    // } else {
+    //   VFI.lastRangeArgs.try_emplace(Arg, getRange(getNode(Arg)));
+    //   isRangeChanged = true;
+    // }
     LLVM_DEBUG(log() << VRALogger::toString(fetchRangeNode(Arg)) << ", ");
   }
   LLVM_DEBUG(log() << "\n");
@@ -207,7 +243,7 @@ void VRAnalyzer::prepareForCall(Instruction* I, std::shared_ptr<AnalysisStore> F
   FStore->setArgumentRanges(*CB->getCalledFunction(), ArgRanges);
 }
 
-void VRAnalyzer::returnFromCall(Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) {
+void VRAnalyzer::returnFromCall(Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI, bool& isRangeChanged) {
   CallBase* CB = cast<CallBase>(I);
   assert(!CB->isIndirectCall());
 
@@ -215,20 +251,20 @@ void VRAnalyzer::returnFromCall(Instruction* I, std::shared_ptr<AnalysisStore> F
     Logger->logInstruction(I);
     Logger->logInfo("returning from call"));
 
-  std::shared_ptr<VRAFunctionStore> FStore = std::static_ptr_cast<VRAFunctionStore>(FunctionStore);
-  std::shared_ptr<ValueInfo> Ret = FStore->getRetVal();
-  if (!Ret) {
-    LLVM_DEBUG(Logger->logInfoln("function returns nothing"));
-  }
-  else if (std::shared_ptr<ValueInfoWithRange> RetRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(Ret)) {
-    saveValueRange(I, RetRange);
-    VFI.lastRange = getRange(RetRange);
-    LLVM_DEBUG(logRangeln(I));
-  }
-  else {
-    setNode(I, Ret);
-    LLVM_DEBUG(Logger->logRangeln(Ret));
-  }
+  // std::shared_ptr<VRAFunctionStore> FStore = std::static_ptr_cast<VRAFunctionStore>(FunctionStore);
+  // std::shared_ptr<ValueInfo> Ret = FStore->getRetVal();
+  // if (!Ret) {
+  //   LLVM_DEBUG(Logger->logInfoln("function returns nothing"));
+  // }
+  // else if (std::shared_ptr<ValueInfoWithRange> RetRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(Ret)) {
+  //   saveValueRange(I, RetRange);
+  //   //VFI.lastRange = getRange(RetRange);
+  //   LLVM_DEBUG(logRangeln(I));
+  // }
+  // else {
+  //   setNode(I, Ret);
+  //   LLVM_DEBUG(Logger->logRangeln(Ret));
+  // }
 }
 
 void VRAnalyzer::prepareForCallPropagation(Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) {
@@ -246,13 +282,16 @@ void VRAnalyzer::prepareForCallPropagation(Instruction* I, std::shared_ptr<Analy
   for (Value* Arg : CB->args()) {
     auto node = getNode(Arg);
     ArgRanges.push_back(node);
-    
+
     if (VFI.lastRangeArgs.count(Arg)) {
       auto IncomingRange = getRange(node);
       if (isNewRangeWiden(VFI.lastRangeArgs[Arg], IncomingRange)) {
         isRangeChanged = true;
         VFI.lastRangeArgs[Arg] = IncomingRange;
+        LLVM_DEBUG(tda::log() << " Argomento "<<Arg->getName()<<" allargato ");
       }
+    } else {
+      isRangeChanged = true;  //new argument
     }
     LLVM_DEBUG(log() << VRALogger::toString(fetchRangeNode(Arg)) << ", ");
   }
@@ -273,7 +312,7 @@ void VRAnalyzer::returnFromCallPropagation(Instruction* I, std::shared_ptr<Analy
     Logger->logInfo("returning from call"));
 
   const std::shared_ptr<Range> oldInfo = fetchRange(I);
-  LLVM_DEBUG(tda::log() << " CALL OLD_RANGE = "<< (oldInfo ? oldInfo->toString() : "(none)") << " ");
+  
 
   std::shared_ptr<VRAFunctionStore> FStore = std::static_ptr_cast<VRAFunctionStore>(FunctionStore);
   std::shared_ptr<ValueInfo> Ret = FStore->getRetVal();
@@ -281,12 +320,21 @@ void VRAnalyzer::returnFromCallPropagation(Instruction* I, std::shared_ptr<Analy
     LLVM_DEBUG(Logger->logInfoln("function returns nothing"));
   }
   else if (std::shared_ptr<ValueInfoWithRange> RetRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(Ret)) {
-    saveValueRange(I, RetRange);
 
-    const std::shared_ptr<Range> newInfo = getRange(RetRange);
-    if (newInfo) LLVM_DEBUG(tda::log() << " CALL NEW_RANGE = "<<newInfo->toString() << " ");
-    isRangeChanged = isNewRangeWiden(oldInfo, newInfo);
-      
+    if (isRangeChanged) {
+      saveValueRange(I, RetRange);
+      const std::shared_ptr<Range> newInfo = getRange(RetRange);
+      isRangeChanged = isNewRangeWiden(oldInfo, newInfo);
+
+      if (isRangeChanged) {
+        LLVM_DEBUG(tda::log() << " CALL OLD_RANGE = "<< (oldInfo ? oldInfo->toString() : "(none)") << " ");
+        if (newInfo) LLVM_DEBUG(tda::log() << " CALL NEW_RANGE = "<<newInfo->toString() << " ");
+      }
+    } else {
+      saveValueRange(I, VFI.lastRange);
+      LLVM_DEBUG(tda::log() <<" retreieved past range "<<VFI.lastRange->toString());
+    }
+
     LLVM_DEBUG(logRangeln(I));
   }
   else {
@@ -326,6 +374,10 @@ std::shared_ptr<Range> VRAnalyzer::getRange(const std::shared_ptr<ValueInfo> VI)
     }
   }
   return nullptr;
+}
+
+std::shared_ptr<Range> VRAnalyzer::getBBRange(const llvm::Value *V) {
+  return getRange(getNode(V));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -462,10 +514,11 @@ void VRAnalyzer::handleReturn(const Instruction* ret, bool& isRangeChanged) {
     std::shared_ptr<ValueInfo> range = getNode(ret_val);
 
     std::shared_ptr<VRAFunctionStore> FStore;
-    if (CodeInt)
+    if (CodeInt) {
       FStore = std::static_ptr_cast<VRAFunctionStore>(CodeInt->getFunctionStore());
-    else
+    } else {
       FStore = std::static_ptr_cast<VRAFunctionStore>(ModInt->getFunctionStore());
+    }
     FStore->setRetVal(range);
 
     LLVM_DEBUG(Logger->logRangeln(range));
@@ -671,7 +724,7 @@ void VRAnalyzer::handlePhiNode(const Instruction* phi, bool& isRangeChanged) {
   LLVM_DEBUG(Logger->logRangeln(res));
 }
 
-void VRAnalyzer::analyzePHIStartInstruction(llvm::Instruction* I) {
+void VRAnalyzer::analyzePHIStartInstruction(llvm::Instruction* I, bool& isRangeChanged) {
   const PHINode* phi_n = cast<PHINode>(I);
   if (phi_n->getNumIncomingValues() == 0U)
     return;
@@ -788,24 +841,153 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
     auto rangeAtZero = VRI.RR->at(0);
     auto rangeAtTC = VRI.RR->at(TripCount);
 
-    auto joinedRange = std::make_shared<Range>(rangeAtZero->join(*rangeAtTC));
+    std::shared_ptr<taffo::Range> joinedRange;
+    if (!rangeAtZero || rangeAtZero == Range::Top().clone()) {
+      joinedRange = rangeAtTC;
+    } else {
+      joinedRange = std::make_shared<Range>(rangeAtZero->join(*rangeAtTC));
+    }
+    
     VRI.lastRange = joinedRange;
     VRI.lastRangeComputedAt = TripCount;
     LLVM_DEBUG(tda::log() << " resolved RR " << VRI.root->getName() << ".at("<<TripCount<<") ");
     isRangeChanged = true; // with new solved RR is always changed = true
 
-    std::shared_ptr<ValueInfo> op_node = getNode(VRI.root);
-    if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
-      const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
-      s_op->range = joinedRange;
-      setNode(VRI.root, s_op);
-      LLVM_DEBUG(Logger->logRangeln(op_range));
-    } else {
-      LLVM_DEBUG(tda::log() << "unable to resolve and store recurrence\n");
+    if (auto* PN = dyn_cast<PHINode>(VRI.root)) {
+
+      const Value* op = PN->getIncomingValue(0);
+      std::shared_ptr<ValueInfo> op_node = getNode(op);
+      if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
+        const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
+        s_op->range = joinedRange;
+        setNode(VRI.root, s_op);
+        LLVM_DEBUG(Logger->logRangeln(op_range));
+      }
+      return;
+    } else if (auto Store = dyn_cast<StoreInst>(VRI.root)) {
+
+      const Value* AddressParam = Store->getPointerOperand();
+      const Value* ValueParam = Store->getValueOperand();
+
+      if (isa<ConstantPointerNull>(ValueParam)) return;
+
+      std::shared_ptr<ValueInfo> AddressNode = getNode(AddressParam);
+      std::shared_ptr<ValueInfo> ValueNode = getNode(ValueParam);
+
+      const std::shared_ptr<Range> oldInfo = getRange(ValueNode);
+
+      if (!ValueNode && !ValueParam->getType()->isPointerTy())
+        ValueNode = fetchRangeNode(VRI.root);
+
+      storeNode(AddressNode, ValueNode);
+      const std::shared_ptr<Range> newInfo = getRange(ValueNode);
+      if (newInfo) LLVM_DEBUG(tda::log() << " STORE NEW_RANGE = "<<newInfo->toString() << " ");
+      return;
+    }
+  }
+  LLVM_DEBUG(tda::log() << "unable to resolve and store recurrence\n");
+}
+
+void VRAnalyzer::retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInfo& VRI, bool& isRangeChanged) {
+  if (!VRI.lastRange) return;
+
+  if (auto* PN = dyn_cast<PHINode>(VRI.root)) {
+
+      auto oldNode = getNode(I);
+      if (!oldNode) isRangeChanged = true;
+
+      const Value* op = PN->getIncomingValue(0);
+      std::shared_ptr<ValueInfo> op_node = getNode(op);
+      if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
+        const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
+        s_op->range = VRI.lastRange;
+        setNode(VRI.root, s_op);
+        LLVM_DEBUG(Logger->logRangeln(op_range));
+        if (oldNode && isNewRangeWiden(getRange(oldNode), VRI.lastRange)) isRangeChanged = true;
+      }
+      return;
+    } else if (auto Store = dyn_cast<StoreInst>(VRI.root)) {
+
+      const Value* AddressParam = Store->getPointerOperand();
+      const Value* ValueParam = Store->getValueOperand();
+
+      if (isa<ConstantPointerNull>(ValueParam)) return;
+
+      std::shared_ptr<ValueInfo> AddressNode = getNode(AddressParam);
+      std::shared_ptr<ValueInfo> ValueNode = getNode(ValueParam);
+
+      const std::shared_ptr<Range> oldInfo = getRange(ValueNode);
+
+      if (!ValueNode && !ValueParam->getType()->isPointerTy())
+        ValueNode = fetchRangeNode(VRI.root);
+
+      storeNode(AddressNode, ValueNode);
+      const std::shared_ptr<Range> newInfo = getRange(ValueNode);
+      if (newInfo) LLVM_DEBUG(tda::log() << " STORE NEW_RANGE = "<<newInfo->toString() << " ");
+      return;
     }
 
-  } else {
+}
 
-  }
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(const llvm::PHINode *phi) {
 
+  const Value* op = phi->getIncomingValue(0);
+  std::shared_ptr<ValueInfo> op_node = getNode(op);
+  std::shared_ptr<Range> StartRange = getRange(op_node);
+
+  const Value* op_1 = phi->getIncomingValue(1);
+  std::shared_ptr<ValueInfo> op_node_1 = getNode(op_1);
+  std::shared_ptr<Range> StepRange = getRange(op_node_1);
+
+  StepRange = handleSub(StepRange, StartRange);
+
+  LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+/**
+ * PRIMA COSA CONTROLLARE CHE CI SIA UN DELTA = 1 TRA STORE E LOAD (se diverso ritorna)
+ * 
+ */
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
+
+  auto StartRange = getRange(getNode(VRI.loadJunction));
+
+  auto op = Store->getValueOperand();
+  auto StepRange = getRange(getNode(op));
+  
+  StepRange = handleSub(StepRange, StartRange);
+
+  LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const llvm::StoreInst* Store) {
+  
+  const Value* AddressParam = Store->getPointerOperand();
+  const Value* ValueParam = Store->getValueOperand();
+  
+  if (isa<ConstantPointerNull>(ValueParam)) return nullptr;
+  std::shared_ptr<ValueInfo> AddressNode = getNode(AddressParam);
+  std::shared_ptr<ValueInfo> ValueNode = getNode(ValueParam);
+
+  std::shared_ptr<Range> StartRange = getRange(getNode(Store));
+  if (!StartRange) StartRange = Range::Top().clone();
+
+  if (!ValueNode && !ValueParam->getType()->isPointerTy())
+    ValueNode = fetchRangeNode(Store);
+
+  std::shared_ptr<Range> StepRange = getRange(ValueNode);
+
+  LLVM_DEBUG(tda::log() << "recognized init(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<RangedRecurrence> VRAnalyzer::buildUnknownRecurrence(const llvm::Value *V) {
+
+  auto StartRange = getRange(getNode(V));
+  auto StepRange = Range::Top().clone();
+
+  LLVM_DEBUG(tda::log() << "recognized unknown(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }

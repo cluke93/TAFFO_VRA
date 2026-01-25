@@ -35,18 +35,27 @@ public:
 
   std::shared_ptr<CILogger> getLogger() const override { return Logger; }
   std::shared_ptr<CodeAnalyzer> clone() override;
+  std::shared_ptr<VRAnalyzer> deepClone() const;
+
   void analyzeInstruction(llvm::Instruction* I, bool& isRangeChanged) override;
-  void analyzePHIStartInstruction(llvm::Instruction* I) override;
+  void analyzePHIStartInstruction(llvm::Instruction* I, bool& isRangeChanged) override;
   void resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, bool& isRangeChanged) override;
+  void retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInfo& VRI, bool& isRangeChanged) override;
   void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) override;
   bool requiresInterpretation(llvm::Instruction* I) const override;
-  void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) override;
-  void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI) override;
+  void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI, bool& isRangeChanged) override;
+  void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, VRAFunctionInfo& VFI, bool& isRangeChanged) override;
 
   void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) override;
   void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore, bool& isRangeChanged, VRAFunctionInfo& VFI) override;
 
   std::shared_ptr<Range>getRange(const std::shared_ptr<ValueInfo> Range);
+  std::shared_ptr<Range>getBBRange(const llvm::Value *V);
+
+  std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) override;
+  std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
+  std::shared_ptr<RangedRecurrence> buildInitRecurrence(const llvm::StoreInst *store) override;
+  std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) override;
 
   static bool classof(const AnalysisStore* AS) { return AS->getKind() == ASK_VRAnalyzer; }
 

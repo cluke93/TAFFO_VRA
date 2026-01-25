@@ -28,6 +28,8 @@ public:
 
   std::shared_ptr<ValueInfo> getNode(const llvm::Value* V) override { return VRAStore::getNode(V); }
 
+  std::shared_ptr<VRAFunctionStore> deepClone() const;
+
   // Function handling stuff
   std::shared_ptr<ValueInfo> getRetVal() const { return ReturnValue; }
   void setRetVal(std::shared_ptr<ValueInfo> RetVal);

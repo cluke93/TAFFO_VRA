@@ -1,5 +1,6 @@
 #include "RangeOperations.hpp"
 #include "VRAStore.hpp"
+#include "ValueRangeAnalysisPass.hpp"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Instruction.h>
@@ -108,16 +109,20 @@ std::shared_ptr<ValueInfo> VRAStore::loadNode(const std::shared_ptr<ValueInfo>& 
   }
 }
 
-std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<ValueInfo>& dst,
-                                                        const std::shared_ptr<ValueInfo>& src) const {
+std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<ValueInfo>& dst, const std::shared_ptr<ValueInfo>& src) const {
   std::shared_ptr<ScalarInfo> scalarDst = std::dynamic_ptr_cast_or_null<ScalarInfo>(dst);
   const std::shared_ptr<ScalarInfo> scalarSrc = std::dynamic_ptr_cast_or_null<ScalarInfo>(src);
   if (!scalarDst || !scalarSrc)
     return nullptr;
   if (scalarDst->isFinal())
     return scalarDst;
-  std::shared_ptr<Range> unionRange = getUnionRange(scalarDst->range, scalarSrc->range);
-  return std::make_shared<ScalarInfo>(nullptr, unionRange);
+
+  if (UseOldVRA) {
+    std::shared_ptr<Range> unionRange = getUnionRange(scalarDst->range, scalarSrc->range);
+    return std::make_shared<ScalarInfo>(nullptr, unionRange);
+  } else {
+    return std::make_shared<ScalarInfo>(nullptr, scalarSrc->range);
+  }
 }
 
 void VRAStore::assignStructNode(const std::shared_ptr<ValueInfo>& dst, const std::shared_ptr<ValueInfo>& src) const {

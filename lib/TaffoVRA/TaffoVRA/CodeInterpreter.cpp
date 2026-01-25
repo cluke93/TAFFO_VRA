@@ -195,9 +195,10 @@ void CodeInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, l
   std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFunctionStore(*this);
 
   VRAFunctionInfo VFI(F, getMAM());
-  CurAnalyzer->prepareForCall(I, FunctionStore, VFI);
+  bool useless = false; //for new vra
+  CurAnalyzer->prepareForCall(I, FunctionStore, VFI, useless);
   interpretFunction(F, FunctionStore);
-  CurAnalyzer->returnFromCall(I, FunctionStore, VFI);
+  CurAnalyzer->returnFromCall(I, FunctionStore, VFI, useless);
 
   updateLoopInfo(I->getFunction());
 }

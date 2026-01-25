@@ -60,6 +60,7 @@ struct VRARecurrenceInfo {
     const llvm::Value* root;
     llvm::SmallVector<const llvm::Value*> chain;
     VRAInspectionKind kind;
+    const llvm::LoadInst* loadJunction = nullptr;
 
     llvm::SmallVector<llvm::Function*> depsOnFn;
     llvm::SmallVector<llvm::Value*> depsOnRR;
@@ -84,9 +85,9 @@ struct VRAFunctionInfo {
     std::shared_ptr<Range> lastRange;
     llvm::DenseMap<llvm::Value*, std::shared_ptr<Range>> lastRangeArgs;
 
-    llvm::DominatorTree* DT;
-    llvm::LoopInfo* LI;
-    llvm::ScalarEvolution* SE;
+    llvm::DominatorTree* DT = nullptr;
+    llvm::LoopInfo* LI = nullptr;
+    llvm::ScalarEvolution* SE = nullptr;
 
     VRAFunctionInfo(): F(nullptr) {}
     VRAFunctionInfo(llvm::Function* F, llvm::ModuleAnalysisManager& MAM): F(F) {
@@ -112,7 +113,6 @@ public:
 
     std::shared_ptr<AnalysisStore> getStoreForValue(const llvm::Value* V) const;
     std::shared_ptr<AnalysisStore> getGlobalStore() const { return GlobalStore; }
-    std::shared_ptr<AnalysisStore> getOriginalGlobalStore() const { return OriginalGlobalStore; }
     std::shared_ptr<AnalysisStore> getFunctionStore() const {
         if (curFn.empty())
             return nullptr;
@@ -136,7 +136,7 @@ protected:
     void preSeed();
     void interpretFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore = nullptr);
     FollowingPathResponse followPath(VRAFunctionInfo info, llvm::BasicBlock* src, llvm::BasicBlock* dst, llvm::SmallVector<llvm::Loop*> nesting) const;
-    void interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I);
+    void interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged);
     
     void updateSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx);
 
@@ -154,16 +154,21 @@ protected:
     void assemble();
 
     bool isSolvableDependenceTree(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
-    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F);
+    bool isSolvableDependenceTreeBackwark(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
+    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F, FunctionScope& FS);
 
     bool isFakeRecurrence(VRARecurrenceInfo& VRI);
     bool isUnknownRecurrence(VRARecurrenceInfo& VRI);
+    bool isInitRecurrence(VRARecurrenceInfo& VRI);
     bool isAffineRecurrence(VRARecurrenceInfo& VRI);
     bool isDeltaAffineRecurrence(VRARecurrenceInfo& VRI);
     bool isGeometricRecurrence(VRARecurrenceInfo& VRI);
     bool isDeltaGeometricRecurrence(VRARecurrenceInfo& VRI);
+    bool isCrossingAffineRecurrence(VRARecurrenceInfo& VRI);
     void fallbackRecurrence(VRARecurrenceInfo& VRI);
     // add here new recurrences...
+
+    const llvm::Value* matchIVOffset(VRAFunctionInfo VFI, const llvm::Value *Idx, int64_t &Offset, llvm::Loop *L);
 
     // 4) TRIP COUNT METHODS
     void tripCount();
@@ -202,7 +207,6 @@ private:
 
     llvm::Module& M;
     std::shared_ptr<AnalysisStore> GlobalStore;
-    std::shared_ptr<AnalysisStore> OriginalGlobalStore;
     llvm::SmallVector<llvm::Function*, 4U> curFn;    //current function scope
     llvm::ModuleAnalysisManager& MAM;
 
