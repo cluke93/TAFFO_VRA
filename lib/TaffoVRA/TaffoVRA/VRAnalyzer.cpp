@@ -583,7 +583,7 @@ void VRAnalyzer::handleStoreInstr(const Instruction* I, bool& isRangeChanged) {
     if (!currentRange)
       currentRange = fetchRange(ValueParam);
 
-    if (auto Scalar = std::dynamic_ptr_cast<ScalarInfo>(ValueNode)) {
+    if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
       auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
       Cloned->range = currentRange;
       ValueNode = Cloned;
@@ -916,7 +916,7 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
           finalRange = std::make_shared<Range>(finalRange->meet(*OpRange));
         }
 
-        if (auto Scalar = std::dynamic_ptr_cast<ScalarInfo>(ValueNode)) {
+        if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
           auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
           Cloned->range = finalRange;
           ValueNode = Cloned;
@@ -976,7 +976,7 @@ void VRAnalyzer::retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInf
           finalRange = std::make_shared<Range>(finalRange->meet(*OpRange));
         }
 
-        if (auto Scalar = std::dynamic_ptr_cast<ScalarInfo>(ValueNode)) {
+        if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
           auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
           Cloned->range = finalRange;
           ValueNode = Cloned;
@@ -1010,10 +1010,7 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(co
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
-/**
- * PRIMA COSA CONTROLLARE CHE CI SIA UN DELTA = 1 TRA STORE E LOAD (se diverso ritorna)
- * 
- */
+// valid when delta index is 1
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
 
   auto StartRange = getRange(getNode(VRI.loadJunction));
@@ -1049,8 +1046,37 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const l
                                          ? StartRange->clone()
                                          : (CurrentValRange ? CurrentValRange->clone() : Range::Top().clone());
 
-  LLVM_DEBUG(tda::log() << "recognized init(start= " << OldRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized init(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<FakeRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildGeometricPHIRecurrence(const llvm::PHINode *phi) {
+
+  const Value* op = phi->getIncomingValue(0);
+  std::shared_ptr<ValueInfo> op_node = getNode(op);
+  std::shared_ptr<Range> StartRange = getRange(op_node);
+
+  const Value* op_1 = phi->getIncomingValue(1);
+  std::shared_ptr<ValueInfo> op_node_1 = getNode(op_1);
+  std::shared_ptr<Range> StepRatio = getRange(op_node_1);
+  
+  StepRatio = handleDiv(StepRatio, StartRange);
+
+  LLVM_DEBUG(tda::log() << "recognized geometric(start= " << StartRange->toString() << ", ratio= " << StepRatio->toString() << ")\n\n");
+  return std::make_shared<GeometricRangedRecurrence>(std::move(StartRange), std::move(StepRatio));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
+
+  auto StartRange = getRange(getNode(VRI.loadJunction));
+
+  auto op = Store->getValueOperand();
+  auto StepRatio = getRange(getNode(op));
+  
+  StepRatio = handleDiv(StepRatio, StartRange);
+
+  LLVM_DEBUG(tda::log() << "recognized geometric(start= " << StartRange->toString() << ", ratio= " << StepRatio->toString() << ")\n\n");
+  return std::make_shared<GeometricRangedRecurrence>(std::move(StartRange), std::move(StepRatio));
 }
 
 std::shared_ptr<RangedRecurrence> VRAnalyzer::buildUnknownRecurrence(const llvm::Value *V) {

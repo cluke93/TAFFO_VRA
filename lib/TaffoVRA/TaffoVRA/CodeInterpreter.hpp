@@ -84,6 +84,8 @@ public:
   virtual std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildInitRecurrence(const llvm::StoreInst *store, std::shared_ptr<taffo::Range> OldRange) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildGeometricPHIRecurrence(const llvm::PHINode *phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
 
   static bool classof(const AnalysisStore* AS) {
     return AS->getKind() >= ASK_VRAGlobalStore && AS->getKind() <= ASK_VRAnalyzer;
