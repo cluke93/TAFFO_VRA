@@ -53,6 +53,7 @@ std::string FakeRangedRecurrence::toString() const {
 // ================= Affine =======================
 
 std::shared_ptr<Range> AffineRangedRecurrence::at(std::uint64_t i) const {
+  if (!Start) return Range::Top().clone();
   if (i == 0) return std::make_shared<Range>(*Start);
   auto term = RangedRecurrence::scaleByUInt(Step, i);
   return handleAdd(Start, term);
@@ -113,6 +114,7 @@ std::shared_ptr<Range> GeometricRangedRecurrence::seriesSumInterval(double rmin,
 }
 
 std::shared_ptr<Range> GeometricRangedRecurrence::at(std::uint64_t i) const {
+  if (!Start) return Range::Top().clone();
   auto powIv = powerInterval(i, Ratio->min, Ratio->max);
   auto out =  handleMul(Start, powIv);
   taffo::outward(*out);

@@ -236,7 +236,7 @@ void ModuleInterpreter::interpret() {
 
 void ModuleInterpreter::resolve() {
     size_t iteration = 1;
-    //size_t changes = 0;
+
     do {
 
         assemble();
@@ -261,7 +261,30 @@ void ModuleInterpreter::resolve() {
 
         ++iteration;
         if (MaxPropagation && iteration > MaxPropagation) {
-            LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << MaxPropagation << " iteration(s) no fixed point reached\n");
+            LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << MaxPropagation << " iteration(s) no fixed point reached: widening falling back remaining RR and last iteration\n");
+            fallback();
+            propagate();
+
+            for (auto &Entry : FNs) {
+                llvm::Function *F = Entry.first;
+                auto &VFI = Entry.second;
+                for (const llvm::BasicBlock &BB : *F) {
+                    for (const llvm::Instruction &I : BB) {
+                        if (const auto *CI = llvm::dyn_cast<llvm::CmpInst>(&I)) {
+                            if (auto SV = getStoreForValue(CI)) {
+                                if (auto SFV = std::static_pointer_cast<VRAnalyzer>(SV)) {
+                                    SFV->fallbackCMP(&I);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            LLVM_DEBUG(tda::log() << "\n\n------------------------------------------------------------------------------\n");
+            LLVM_DEBUG(tda::log() << "propagation fallback completed: changing on " << propagationChanging << " instructions.\n");
+            LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
+
             break;
         }
     } while (solvedRR.size() != 0);
@@ -283,6 +306,10 @@ void ModuleInterpreter::preSeed() {
 
     for (Function& F : M) {
         if (!F.empty() && (TaffoInfo::getInstance().isStartingPoint(F)) && F.getName() == "main") {
+
+            auto InsertRes = FNs.try_emplace(&F, VRAFunctionInfo(&F, getMAM()));
+            VRAFunctionInfo& VFI = InsertRes.first->second;
+
             interpretFunction(&F);
             EntryFn = &F;
         }
@@ -300,14 +327,12 @@ void ModuleInterpreter::preSeed() {
  */
 void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore) {
 
-
     if (FNs.count(F) && FNs[F].bbFlow.size() > 0) {
         LLVM_DEBUG(tda::log() << "FN["<<F->getName()<<"] already interpreted\n");
         return;
     }
 
-    auto InsertRes = FNs.try_emplace(F, VRAFunctionInfo(F, MAM));
-    VRAFunctionInfo& VFI = InsertRes.first->second;
+    VRAFunctionInfo& VFI = FNs[F];
 
     if (!FunctionStore)
         FunctionStore = GlobalStore->newFnStore(*this);
@@ -416,8 +441,8 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
 
 FollowingPathResponse ModuleInterpreter::followPath(VRAFunctionInfo info, llvm::BasicBlock* src, llvm::BasicBlock* dst, llvm::SmallVector<llvm::Loop*> nesting) const {
 
-    llvm::Loop* srcLoop = info.LI ? info.LI->getLoopFor(src) : nullptr;
-    llvm::Loop* dstLoop = info.LI ? info.LI->getLoopFor(dst) : nullptr;
+    llvm::Loop* srcLoop = info.LI->getLoopFor(src);
+    llvm::Loop* dstLoop = info.LI->getLoopFor(dst);
 
     if (srcLoop && isLoopExit(srcLoop, dst)) return FollowingPathResponse::NO_ENQUE;
 
@@ -428,7 +453,7 @@ FollowingPathResponse ModuleInterpreter::followPath(VRAFunctionInfo info, llvm::
     for (BasicBlock* pred : predecessors(dst)) {
 
         // do not analyze header predecessors if latch
-        llvm::Loop* predLoop = info.LI ? info.LI->getLoopFor(pred) : nullptr;
+        llvm::Loop* predLoop = info.LI->getLoopFor(pred);
         if (predLoop && isLoopLatch(predLoop, pred) && dst == predLoop->getHeader()) continue;
         if (dstLoop && predLoop == dstLoop->getParentLoop() && dstLoop->getHeader() == dst) continue;               // blocco prima del loop più esterno per forza visitato
 
@@ -506,10 +531,12 @@ void ModuleInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer,
         return;
 
     std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFnStore(*this);
+    auto InsertRes = FNs.try_emplace(F, VRAFunctionInfo(F, getMAM()));
+    VRAFunctionInfo& VFI = InsertRes.first->second;
 
-    CurAnalyzer->prepareForCall(I, FunctionStore, FNs[F], isRangeChanged);
+    CurAnalyzer->prepareForCall(I, FunctionStore, VFI, isRangeChanged);
     interpretFunction(F, FunctionStore);
-    CurAnalyzer->returnFromCall(I, FunctionStore, FNs[F], isRangeChanged);
+    CurAnalyzer->returnFromCall(I, FunctionStore, VFI, isRangeChanged);
 }
 
 void ModuleInterpreter::resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged) {
@@ -1044,7 +1071,7 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
     if (VRI.kind != VRAInspectionKind::REC) return false;
     LLVM_DEBUG(tda::log() << "\t\ttry to recognize as affine recurrence... \n");
 
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore)->deepClone();
+    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
     const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
     llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
     VRAFunctionInfo &VFI = FNs[F];
@@ -1178,7 +1205,7 @@ bool ModuleInterpreter::isGeometricRecurrence(VRARecurrenceInfo& VRI) {
     if (VRI.kind != VRAInspectionKind::REC) return false;
     LLVM_DEBUG(tda::log() << "\t\ttry to recognize as geometric recurrence... \n");
 
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore)->deepClone();
+    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
     const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
     llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
     VRAFunctionInfo &VFI = FNs[F];
@@ -1576,6 +1603,38 @@ void ModuleInterpreter::propagate() {
     curFn.clear();
     propagationChanging = 0;
     propagateFunction(EntryFn);
+
+}
+
+void ModuleInterpreter::fallback() {
+
+    for (auto &Entry : FNs) {
+        llvm::Function *F = Entry.first;
+        auto &VFI = Entry.second;
+
+        for (auto &LEntry : VFI.loops) {
+            const llvm::Loop *L = LEntry.first;
+            auto &VLI = LEntry.second;
+            if (VLI.TripCount == 0)
+                VLI.TripCount = std::numeric_limits<uint64_t>::max();
+        }
+
+        for (auto &RREntry : VFI.RRs) {
+            const llvm::Value* root = RREntry.first;
+            auto &VRI = RREntry.second;
+
+            if (VRI.RR) continue;   //already solved
+
+            VRI.depsOnFn.clear();
+            VRI.depsOnFn.clear();
+            VRI.RR = std::make_shared<FakeRangedRecurrence>(nullptr, std::move(Range::Top().clone()));
+            VRI.lastRange = Range::Top().clone();
+            VRI.lastRangeComputedAt = std::numeric_limits<uint64_t>::max();
+            solvedRR.push_back(VRI.root);
+
+            LLVM_DEBUG(tda::log() << "fallback applied on RR " << printInstrName(VRI.root) << " due to unrecognized or dependency unsolvable.\n");
+        }
+    }
 
 }
 

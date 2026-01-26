@@ -845,6 +845,14 @@ void VRAnalyzer::logRangeln(const Value* v) {
   LLVM_DEBUG(Logger->logRangeln(fetchRangeNode(v)));
 }
 
+void VRAnalyzer::fallbackCMP(const Instruction* I) {
+  saveValueRange(I, getGenericBoolRange());
+  LLVM_DEBUG({
+    Logger->logInstruction(I);
+    Logger->logInfoln("fallback CMP range forced to [0,1]");
+  });
+}
+
 void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, bool& isRangeChanged) {
   if (!VRI.RR || TripCount == 0) return;
 
@@ -1006,7 +1014,7 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(co
 
   StepRange = handleSub(StepRange, StartRange);
 
-  LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized affine(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
@@ -1014,13 +1022,14 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(co
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
 
   auto StartRange = getRange(getNode(VRI.loadJunction));
+  if (!StartRange) StartRange = Range::Top().clone();
 
   auto op = Store->getValueOperand();
   auto StepRange = getRange(getNode(op));
   
   StepRange = handleSub(StepRange, StartRange);
 
-  LLVM_DEBUG(tda::log() << "recognized affine(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized affine(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
@@ -1046,7 +1055,7 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const l
                                          ? StartRange->clone()
                                          : (CurrentValRange ? CurrentValRange->clone() : Range::Top().clone());
 
-  LLVM_DEBUG(tda::log() << "recognized init(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized init(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<FakeRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
@@ -1062,7 +1071,7 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildGeometricPHIRecurrence
   
   StepRatio = handleDiv(StepRatio, StartRange);
 
-  LLVM_DEBUG(tda::log() << "recognized geometric(start= " << StartRange->toString() << ", ratio= " << StepRatio->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized geometric(start= " << (StartRange ? StartRange->toString() : "(none)") << ", ratio= " << StepRatio->toString() << ")\n\n");
   return std::make_shared<GeometricRangedRecurrence>(std::move(StartRange), std::move(StepRatio));
 }
 
@@ -1075,7 +1084,7 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildGeometricStoreRecurren
   
   StepRatio = handleDiv(StepRatio, StartRange);
 
-  LLVM_DEBUG(tda::log() << "recognized geometric(start= " << StartRange->toString() << ", ratio= " << StepRatio->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized geometric(start= " << (StartRange ? StartRange->toString() : "(none)") << ", ratio= " << StepRatio->toString() << ")\n\n");
   return std::make_shared<GeometricRangedRecurrence>(std::move(StartRange), std::move(StepRatio));
 }
 
@@ -1084,6 +1093,6 @@ std::shared_ptr<RangedRecurrence> VRAnalyzer::buildUnknownRecurrence(const llvm:
   auto StartRange = getRange(getNode(V));
   auto StepRange = Range::Top().clone();
 
-  LLVM_DEBUG(tda::log() << "recognized unknown(start= " << StartRange->toString() << ", step= " << StepRange->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized unknown(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }

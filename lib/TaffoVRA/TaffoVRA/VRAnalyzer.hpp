@@ -52,6 +52,8 @@ public:
   std::shared_ptr<Range>getRange(const std::shared_ptr<ValueInfo> Range);
   std::shared_ptr<Range>getBBRange(const llvm::Value *V);
 
+  void fallbackCMP(const llvm::Instruction* I);
+
   std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) override;
   std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
   std::shared_ptr<RangedRecurrence> buildInitRecurrence(const llvm::StoreInst *store, std::shared_ptr<taffo::Range> OldRange) override;

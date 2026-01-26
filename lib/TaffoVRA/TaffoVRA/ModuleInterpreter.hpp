@@ -6,7 +6,7 @@
 #include <llvm/IR/Dominators.h>
 #include <llvm/Analysis/ScalarEvolution.h>
 #include <memory>
-
+#define DEBUG_TYPE "taffo-vra"
 namespace taffo {
 
 class Range;
@@ -95,8 +95,6 @@ struct VRAFunctionInfo {
         LI = &(FAM.getResult<llvm::LoopAnalysis>(*F));
         DT = &(FAM.getResult<llvm::DominatorTreeAnalysis>(*F));
         SE = &(FAM.getResult<llvm::ScalarEvolutionAnalysis>(*F));
-
-        //todo: argument handlers??
     }
 
     size_t countLoops() { return loops.size(); }
@@ -184,7 +182,8 @@ protected:
     void propagateFunction(llvm::Function* F);
     void walk(llvm::Loop* L = nullptr);
 
-
+    // resolve all locked loops and RR after last iteration and iterate one again
+    void fallback();
 
     // Statistic methods
     size_t countLoops() {
@@ -216,7 +215,6 @@ private:
     llvm::SmallVector<const llvm::Value*> solvedRR;
     u_int16_t solvedTC;
     u_int64_t propagationChanging;
-
 };
 
 }
