@@ -1018,6 +1018,17 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(co
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
+
+  auto StartRange = getRange(getNode(VRI.loadJunction));
+
+  auto StepRange = getRange(getNode(VRI.loadHigherDim));
+  StepRange = handleSub(StepRange, StartRange);
+
+  LLVM_DEBUG(tda::log() << "recognized affine_flatting(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
+  return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
 // valid when delta index is 1
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
 
@@ -1046,12 +1057,14 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const l
 
   if (!ValueNode && !ValueParam->getType()->isPointerTy())
     ValueNode = fetchRangeNode(Store);
-
+    
   // Use defensive copies to avoid later widening mutating the recurrence seed.
   std::shared_ptr<Range> CurrentValRange = getRange(ValueNode);
   if (CurrentValRange)
     CurrentValRange = CurrentValRange->clone();
-  std::shared_ptr<Range> StepRange = isNewRangeWiden(OldRange, CurrentValRange)
+
+  
+  std::shared_ptr<Range> StepRange = !StartRange->isTop() && isNewRangeWiden(StartRange, CurrentValRange)
                                          ? StartRange->clone()
                                          : (CurrentValRange ? CurrentValRange->clone() : Range::Top().clone());
 

@@ -5,6 +5,7 @@
 #include "VRAGlobalStore.hpp"
 #include "VRAnalyzer.hpp"
 
+#include <llvm/ADT/APFloat.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Analysis/IVDescriptors.h>
@@ -81,10 +82,61 @@ static const Value* stripCasts(const Value *V) {
                 continue;
             }
         }
+        if (auto *Op = dyn_cast<Operator>(Cur)) {
+            unsigned opc = Op->getOpcode();
+            if (opc == Instruction::BitCast || opc == Instruction::AddrSpaceCast) {
+                Cur = Op->getOperand(0);
+                continue;
+            }
+        }
         break;
     }
     return Cur;
 };
+
+// return for load and stores its array dimension
+static int getArrayAccessDimFromPtr(const Value *Ptr) {
+  Ptr = stripCasts(Ptr);
+
+  int dims = 0;
+  const Value *Cur = Ptr;
+
+  while (Cur) {
+    Cur = stripCasts(Cur);
+
+    const GEPOperator *GEP = dyn_cast<GEPOperator>(Cur);
+    if (!GEP) break;
+
+    Type *Ty = GEP->getSourceElementType();
+    unsigned pos = 0;
+
+    for (auto It = GEP->idx_begin(); It != GEP->idx_end(); ++It, ++pos) {
+      if (pos == 0)
+        continue;
+
+      if (auto *Arr = dyn_cast<ArrayType>(Ty)) {
+        ++dims;
+        Ty = Arr->getElementType();
+        continue;
+      }
+
+      if (auto *ST = dyn_cast<StructType>(Ty)) {
+        if (auto *CI = dyn_cast<ConstantInt>(It->get())) {
+          unsigned field = CI->getZExtValue();
+          if (field < ST->getNumElements()) {
+            Ty = ST->getElementType(field);
+            continue;
+          }
+        }
+        return -1;
+      }
+    }
+
+    Cur = GEP->getPointerOperand();
+  }
+
+  return dims;
+}
 
 static void printValueName(llvm::raw_ostream &OS, const llvm::Value *V) {
     if (!V) return;
@@ -728,6 +780,8 @@ void ModuleInterpreter::handleStoreChain(VRAFunctionInfo VFI, Loop* L, const Sto
     while (!worklist.empty()) {
         const Value *cur = worklist.pop_back_val();
         if (!visited.insert(cur).second) continue;
+        
+        if (isa<Constant>(cur)) { couldBeInit = true; continue; }
 
         if (auto *Load = dyn_cast<LoadInst>(cur)) {
 
@@ -760,18 +814,32 @@ void ModuleInterpreter::handleStoreChain(VRAFunctionInfo VFI, Loop* L, const Sto
             couldBeInit = true;
             continue;   // load from a different base: treat as init candidate
         }
-
+        
         if (auto *callInstr = dyn_cast<CallInst>(cur)) {
             Type *retTy = callInstr->getType();
             couldBeInit = !retTy->isVoidTy();
             continue; // stop: call result is a source
         }
-
+        
         // Walk backwards through operands to reach defining loads.
-        if (auto *I = dyn_cast<Instruction>(cur)) {
+        if (auto *I = dyn_cast<Instruction>(cur)) {  LLVM_DEBUG(tda::log() << " (cur instr: "<<cur->getName()<<") ");
             for (const Value *Op : I->operands()) {
-                if (isa<Constant>(Op)) continue;
+                if (isa<Constant>(Op)) { couldBeInit = true; continue; }
                 enqueue(cur, Op);
+            }
+        }
+
+        if (auto *I = dyn_cast<CastInst>(cur)) {  LLVM_DEBUG(tda::log() << " (cur cast: "<<cur->getName()<<") ");
+            for (const Value *Op : I->operands()) {
+                if (isa<Constant>(Op)) { couldBeInit = true; continue; }
+                enqueue(cur, Op);
+            }
+        }
+
+        if (auto *PHI = dyn_cast<PHINode>(cur)) {  LLVM_DEBUG(tda::log() << " (cur phi: "<<cur->getName()<<") ");
+            auto *I = dyn_cast<Instruction>(PHI);
+            if (I->getParent() == L->getHeader()) {
+                couldBeInit = true;
             }
         }
     }
@@ -853,6 +921,177 @@ void ModuleInterpreter::assemble() {
     }
 }
 
+/// Strip di cast/wrappers comuni per risalire al "vero" producer.
+/// - CastInst copre: sext/zext/trunc/bitcast/sitofp/fptosi/ptrtoint/inttoptr, etc.
+static const Value* stripCastsAndWrappers(const Value* V) {
+  while (V) {
+    if (auto *CI = dyn_cast<CastInst>(V)) {
+      V = CI->getOperand(0);
+      continue;
+    }
+    if (auto *FI = dyn_cast<FreezeInst>(V)) {
+      V = FI->getOperand(0);
+      continue;
+    }
+    if (auto *UO = dyn_cast<UnaryOperator>(V)) {
+      if (UO->getOpcode() == Instruction::FNeg) {
+        V = UO->getOperand(0);
+        continue;
+      }
+    }
+    break;
+  }
+  return V;
+}
+
+/// True se PhiLoop è uguale a UseLoop o un suo parent (risalendo la catena dei parent).
+static bool isSameOrParentLoop(const Loop* UseLoop, const Loop* PhiLoop) {
+  if (!UseLoop || !PhiLoop) return false;
+  for (const Loop* L = UseLoop; L; L = L->getParentLoop())
+    if (L == PhiLoop) return true;
+  return false;
+}
+
+/// Colleziona i PHI che influenzano Root (def-use backward),
+/// filtrando SOLO i PHI presenti nei loop header (BB == Loop->getHeader()).
+/// Include i PHI di loop padri del loop che contiene UseCtx.
+static SmallVector<const PHINode*, 4> collectInfluencingHeaderPHIs(const Value* Root, const Instruction* UseCtx, const LoopInfo& LI) {
+  SmallVector<const PHINode*, 4> Result;
+  if (!Root || !UseCtx) return Result;
+
+  const Loop* UseLoop = LI.getLoopFor(UseCtx->getParent());
+
+  SmallVector<const Value*, 32> Stack;
+  SmallPtrSet<const Value*, 32> Visited;
+  SmallPtrSet<const PHINode*, 16> SeenPHI;
+
+  Stack.push_back(Root);
+
+  while (!Stack.empty()) {
+    const Value* V = Stack.pop_back_val();
+    V = stripCastsAndWrappers(V);
+    if (!V) continue;
+
+    if (!Visited.insert(V).second)
+      continue;
+
+    // Caso PHI
+    if (auto *PN = dyn_cast<PHINode>(V)) {
+      const BasicBlock* PhiBB = PN->getParent();
+      const Loop* PhiLoop = LI.getLoopFor(PhiBB);
+
+      bool ok = false;
+
+      // 1) Deve appartenere a un loop (per essere "loop header PHI")
+      if (PhiLoop) {
+        // 2) Deve essere NELL'HEADER del SUO loop
+        if (PhiBB == PhiLoop->getHeader()) {
+          if (!UseLoop) {
+            // Uso fuori da loop: qui decidi policy.
+            // Scelta: accettiamo comunque PHI header (di qualsiasi loop).
+            ok = true;
+          } else {
+            // 3) Deve essere in UseLoop o in un suo parent (loop esterni),
+            //    NON in subloop.
+            ok = isSameOrParentLoop(UseLoop, PhiLoop);
+          }
+        }
+      }
+
+      if (ok && SeenPHI.insert(PN).second)
+        Result.push_back(PN);
+
+      // Nota: NON espandiamo gli incoming del PHI per evitare di “risalire”
+      // dentro la logica di update; qui vogliamo solo le dipendenze “IV-like”.
+      continue;
+    }
+
+    // Caso istruzione generica: espandi gli operandi
+    if (auto *I = dyn_cast<Instruction>(V)) {
+      for (const Value* Op : I->operands())
+        Stack.push_back(Op);
+      continue;
+    }
+
+    // Constant/Argument/Global: fine ramo
+  }
+
+  return Result;
+}
+
+bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionInfo& VFI, VRARecurrenceInfo& VRI, VRALoopInfo& VLI) {
+
+    if (auto CB = dyn_cast<CallBase>(cur)) {
+        if (!VLI.isInvariant(cur)) {
+            bool atLeastOneUnsolvedArg = false;
+            for (const Use &Arg : CB->args()) {
+                const llvm::Value *ArgV = Arg.get();
+                if (VLI.isInvariant(ArgV)) continue;
+                if (VFI.RRs.count(ArgV) && !VFI.RRs[ArgV].lastRange)
+                    atLeastOneUnsolvedArg = true;
+                
+            }
+            if (atLeastOneUnsolvedArg) {
+                VRI.depsOnFn.push_back(CB->getCalledFunction());
+                return false;
+            }
+            
+            VRI.depsOnFn.clear();
+        } else {
+            LLVM_DEBUG(tda::log() << " operando call invariante, posso usare il suo range ");
+        }
+    }
+    else if (!VLI.isInvariant(cur)) {
+        if (auto Load = dyn_cast<LoadInst>(cur)) { 
+            auto IV = getInductionFromLoad(Load, VFI.LI); 
+            LLVM_DEBUG(if (IV) tda::log() << " (IV: "<<IV->getName()<<") ");
+            if (VFI.RRs.count(IV) && VFI.RRs[IV].lastRange) {
+
+                // if idx solved check base
+                const Value *LoadBase = getBaseMemoryObject(Load->getPointerOperand());
+                if (LoadBase) {
+                    for (auto [R, RR] : VFI.RRs) {
+                        const auto *RootStore = dyn_cast<StoreInst>(R);
+                        if (!RootStore || R == VRI.root) continue;
+                        
+                        const Value *RootBase = getBaseMemoryObject(RootStore->getPointerOperand());
+
+                        if (getArrayAccessDimFromPtr(Load->getPointerOperand()) > getArrayAccessDimFromPtr(RootStore->getPointerOperand())) {
+                            LLVM_DEBUG(tda::log() << " attenzzioonee ");
+                            VRI.loadHigherDim = Load;
+                        }
+
+                        if (RootBase != LoadBase) continue;
+                        if (!RR.lastRange) {
+                            VRI.depsOnRR.push_back(const_cast<llvm::Value*>(R));
+                            LLVM_DEBUG(tda::log() << " dep on past store unsolved ");
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+        } else {
+
+            if (!VFI.RRs.count(cur)) { //LLVM_DEBUG(tda::log() << " (C) ");
+                auto PHIs = collectInfluencingHeaderPHIs(cur, dyn_cast<Instruction>(cur), *VFI.LI);
+                for (auto PHI : PHIs) {
+                    // LLVM_DEBUG(tda::log() << " trovato phi radice: "<<PHI->getName() << "| ");
+                    if (VFI.RRs.count(PHI) && VFI.RRs[PHI].lastRange)
+                        return true;
+                    VRI.depsOnRR.push_back(const_cast<llvm::Value*>(dyn_cast<Value>(PHI)));
+                    return false;
+                }
+            } else {
+                if (VFI.RRs.count(cur) && VFI.RRs[cur].lastRange)
+                    return true;
+                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(cur));
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI) {
     if (!V || !L) return false;
@@ -878,51 +1117,9 @@ bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loo
     while (!worklist.empty()) {
         const Value *cur = worklist.pop_back_val();
         //controllo invarianza
+        LLVM_DEBUG(tda::log() << " (analyzing " << printInstrName(cur) << ") ");
 
-        if (auto CB = dyn_cast<CallBase>(I)) {
-            // check invarianza di tutti gli argomenti
-            
-            if (!VLI.isInvariant(I)) {
-
-                bool atLeastOneUnsolvedArg = false;
-                for (const Use &Arg : CB->args()) {
-                    const llvm::Value *ArgV = Arg.get();
-                    if (VLI.isInvariant(ArgV))
-                        continue;
-
-                    if (VFI.RRs.count(ArgV) && !VFI.RRs[ArgV].lastRange) {
-                        atLeastOneUnsolvedArg = true;
-                    }
-                }
-
-                if (atLeastOneUnsolvedArg) {
-                    VRI.depsOnFn.push_back(CB->getCalledFunction());
-                    return false;
-                } else {
-                    VRI.depsOnFn.clear();
-                }
-            } else {
-                LLVM_DEBUG(tda::log() << " operando call invariante, posso usare il suo range ");
-            }
-
-        }
-
-        else if (!VLI.isInvariant(cur)) {
-
-            if (auto Load = dyn_cast<LoadInst>(cur)) {
-                if (auto IV = getInductionFromLoad(Load, VFI.LI)) {
-                    if (VFI.RRs.count(IV) && VFI.RRs[IV].lastRange) {
-                        continue;
-                    }
-                }
-            } else {
-                if (VFI.RRs.count(cur) && VFI.RRs[cur].lastRange) {
-                    continue;
-                }
-                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(cur));
-                return false;
-            }
-        }
+        if (!analyzeSolvability(cur, VFI, VRI, VLI)) return false;
         
         for (const User *U : cur->users()) {
             auto *I = dyn_cast<Instruction>(U);
@@ -939,7 +1136,7 @@ bool ModuleInterpreter::isSolvableDependenceTree(const llvm::Value *V, llvm::Loo
     return true;
 }
 
-// Like isSolvableDependenceTree but walks operands backwards (SSA defs) instead of users.
+
 bool ModuleInterpreter::isSolvableDependenceTreeBackwark(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI) {
     if (!V || !L) return false;
     if (V == VRI.root || isa<Constant>(V)) return true;
@@ -967,58 +1164,9 @@ bool ModuleInterpreter::isSolvableDependenceTreeBackwark(const llvm::Value *V, l
     while (!worklist.empty()) {
         const Value *cur = worklist.pop_back_val();
         if (!visited.insert(cur).second) continue;
-        LLVM_DEBUG(tda::log() << " (analyzing backward " << printInstrName(cur) << ") ");
+        LLVM_DEBUG(tda::log() << " (analyzing backward " << printInstrName(cur) << ") => ");
 
-        // Invariance / solved RR checks mirror the forward version
-        if (auto CB = dyn_cast<CallBase>(cur)) {
-            if (!VLI.isInvariant(cur)) {
-                bool atLeastOneUnsolvedArg = false;
-                for (const Use &Arg : CB->args()) {
-                    const llvm::Value *ArgV = Arg.get();
-                    if (VLI.isInvariant(ArgV)) continue;
-                    if (VFI.RRs.count(ArgV) && !VFI.RRs[ArgV].lastRange)
-                        atLeastOneUnsolvedArg = true;
-                    
-                }
-                if (atLeastOneUnsolvedArg) {
-                    VRI.depsOnFn.push_back(CB->getCalledFunction());
-                    return false;
-                }
-                
-                VRI.depsOnFn.clear();
-            }
-        }
-        else if (!VLI.isInvariant(cur)) {
-            if (auto Load = dyn_cast<LoadInst>(cur)) { 
-                auto IV = getInductionFromLoad(Load, VFI.LI); 
-                LLVM_DEBUG(if (IV) tda::log() << " (IV: "<<IV->getName()<<") ");
-                if (VFI.RRs.count(IV) && VFI.RRs[IV].lastRange) {
-
-                    // if idx solved check base
-                    const Value *LoadBase = getBaseMemoryObject(Load->getPointerOperand());
-                    if (LoadBase) {
-                        for (auto [R, RR] : VFI.RRs) {
-                            const auto *RootStore = dyn_cast<StoreInst>(R);
-                            if (!RootStore || R == VRI.root) continue;
-
-                            const Value *RootBase = getBaseMemoryObject(RootStore->getPointerOperand());
-                            if (RootBase != LoadBase) continue;
-                            if (!RR.lastRange) {
-                                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(R));
-                                LLVM_DEBUG(tda::log() << " dep on past store unsolved ");
-                                return false;
-                            }
-                        }
-                    }
-                    continue;
-                }
-            } else {
-                if (VFI.RRs.count(cur) && VFI.RRs[cur].lastRange)
-                    continue;
-                VRI.depsOnRR.push_back(const_cast<llvm::Value*>(cur));
-                return false;
-            }
-        }
+        if (!analyzeSolvability(cur, VFI, VRI, VLI)) return false;
         
         if (auto *Inst = dyn_cast<Instruction>(cur)) {
             for (const Value *Op : Inst->operands()) {
@@ -1028,6 +1176,7 @@ bool ModuleInterpreter::isSolvableDependenceTreeBackwark(const llvm::Value *V, l
         }
     }
 
+    LLVM_DEBUG(tda::log() << "\n");
     return true;
 }
 
@@ -1088,7 +1237,7 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
         }
 
         if (!isSolvable) {
-            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvale yet: it depends on other unsolved recurrences\n");
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
             return true;
         }
 
@@ -1113,36 +1262,49 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
         }
 
         if (!isSolvable) {
-            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvale yet: it depends on other unsolved recurrences\n");
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
             return true;
         }
 
-
-        const Value *StoreIdx = getIndexOperand(Store->getPointerOperand());
-        const Value *LoadIdx = getIndexOperand(VRI.loadJunction->getPointerOperand());
-
-        // check delta idx == 1
-        int64_t StoreOff = 0;
-        int64_t LoadOff = 0;
-
-
-        const Value *StoreIV = matchIVOffset(VFI, StoreIdx, StoreOff, L);
-        const Value *LoadIV = matchIVOffset(VFI, LoadIdx, LoadOff, L);
-        if (!StoreIV || !LoadIV || StoreIV != LoadIV) return false;
-        
-        const int64_t delta = StoreOff - LoadOff;
-        if (std::abs(delta) != 1) return false;
-        
-        // Possiamo usare lo scope allo stato Sn il quale è stato già oggetto di preseeding (S1) oppure propagation (St con t num iterazioni)
-
-        if (auto *latch = L->getLoopLatch()) {
-            auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
-            std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildAffineStoreRecurrence(VRI, Store);
-            if (RR) {
-                VRI.RR = RR;
-                solvedRR.push_back(VRI.root);
+        // affine case 1: load from higher dimensional array
+        if (VRI.loadHigherDim) {
+            if (auto *latch = L->getLoopLatch()) {
+                auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+                std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildAffineFlattingRecurrence(VRI, Store);
+                if (RR) {
+                    VRI.RR = RR;
+                    solvedRR.push_back(VRI.root);
+                }
             }
         }
+        
+        //affine case 2: same base with index delta == 1
+        else if (getBaseMemoryObject(Store->getPointerOperand()) == getBaseMemoryObject(VRI.loadJunction->getPointerOperand())) {
+            const Value *StoreIdx = getIndexOperand(Store->getPointerOperand());
+            const Value *LoadIdx = getIndexOperand(VRI.loadJunction->getPointerOperand());
+
+            int64_t StoreOff = 0;
+            int64_t LoadOff = 0;
+
+            const Value *StoreIV = matchIVOffset(VFI, StoreIdx, StoreOff, L);
+            const Value *LoadIV = matchIVOffset(VFI, LoadIdx, LoadOff, L);
+            if (!StoreIV || !LoadIV || StoreIV != LoadIV) return false;
+            
+            const int64_t delta = StoreOff - LoadOff;
+            if (std::abs(delta) != 1) return false;
+            
+            // Possiamo usare lo scope allo stato Sn il quale è stato già oggetto di preseeding (S1) oppure propagation (St con t num iterazioni)
+
+            if (auto *latch = L->getLoopLatch()) {
+                auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+                std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildAffineStoreRecurrence(VRI, Store);
+                if (RR) {
+                    VRI.RR = RR;
+                    solvedRR.push_back(VRI.root);
+                }
+            }
+        }
+
     }
     return true;
 }
@@ -1160,15 +1322,6 @@ bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
     llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
     VRALoopInfo &VLI = VFI.loops[L];
 
-    // LLVM_DEBUG(tda::log() << "-- creazione copia temp di function store -- ");
-    // FunctionScope VFS = GlobalStore->newFnStore(*this);
-    // VFS.FunctionStore = std::static_pointer_cast<VRAFunctionStore>(VFI.scope.FunctionStore)->deepClone();
-    // LLVM_DEBUG(tda::log() << "-- creazione copia temp di analyzer di "<<VLI.bbFlow.front()->getName()<<" da originale\n");
-    // VFS.BBAnalyzers[VLI.bbFlow.front()] = std::static_pointer_cast<VRAnalyzer>(VFI.scope.BBAnalyzers[VLI.bbFlow.front()])->deepClone();
-
-    /**
-     * PRENDERE IL PAST RANGE DAL GLOBAL CON LE ANNOTAZIONI, IN MODO DA POTER FARE NARROWING
-     */
     auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
     auto OldRange = GStore->fetchRange(VRI.root);
     LLVM_DEBUG(tda::log() << " il vecchio range era " << (OldRange ? OldRange->toString() : " (null) ") << " -");
@@ -1180,10 +1333,29 @@ bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
             return true;
         }
 
-        auto SFV = std::static_pointer_cast<VRAnalyzer>(getStoreForValue(Store->getValueOperand()));
-        if (!SFV) return true;
+        std::shared_ptr<RangedRecurrence> RR;
+        if (isa<llvm::ConstantInt>(Store->getValueOperand()) || isa<llvm::ConstantFP>(Store->getValueOperand())) {
+            llvm::APFloat ConstVal(0.0);
+            if (const auto *CI = llvm::dyn_cast<llvm::ConstantInt>(Store->getValueOperand())) {
+                ConstVal = llvm::APFloat(static_cast<double>(CI->getSExtValue()));
+            } else if (const auto *CFP = llvm::dyn_cast<llvm::ConstantFP>(Store->getValueOperand())) {
+                ConstVal = CFP->getValueAPF();
+                bool losesInfo = false;
+                ConstVal.convert(llvm::APFloat::IEEEdouble(), llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+            }
+
+            auto StepRange = Range::Point(ConstVal).clone();
+            LLVM_DEBUG(tda::log() << "recognized init(start= " << (OldRange ? OldRange->toString() : "(none)") << ", step= " << StepRange << ")\n\n");
+            RR = std::make_shared<FakeRangedRecurrence>(std::move(OldRange), std::move(StepRange));
+        } else if (isa<Constant>(Store->getValueOperand())) {
+            return false;
+        } else {
+            auto SFV = std::static_pointer_cast<VRAnalyzer>(getStoreForValue(Store->getValueOperand()));
+            if (!SFV) return true;
+            RR = SFV->buildInitRecurrence(Store, OldRange);
+        }
+
         
-        std::shared_ptr<RangedRecurrence> RR = SFV->buildInitRecurrence(Store, OldRange);
         if (RR) {
             VRI.RR = RR;
             solvedRR.push_back(VRI.root);

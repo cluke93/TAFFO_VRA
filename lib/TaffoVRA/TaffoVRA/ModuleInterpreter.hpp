@@ -61,6 +61,7 @@ struct VRARecurrenceInfo {
     llvm::SmallVector<const llvm::Value*> chain;
     VRAInspectionKind kind;
     const llvm::LoadInst* loadJunction = nullptr;
+    const llvm::LoadInst* loadHigherDim = nullptr;
 
     llvm::SmallVector<llvm::Function*> depsOnFn;
     llvm::SmallVector<llvm::Value*> depsOnRR;
@@ -151,6 +152,7 @@ protected:
     // 3) ASSEMBLING METHODS
     void assemble();
 
+    bool analyzeSolvability(const llvm::Value* cur, VRAFunctionInfo& VFI, VRARecurrenceInfo& VRI, VRALoopInfo& VLI);
     bool isSolvableDependenceTree(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
     bool isSolvableDependenceTreeBackwark(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
     void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F, FunctionScope& FS);
