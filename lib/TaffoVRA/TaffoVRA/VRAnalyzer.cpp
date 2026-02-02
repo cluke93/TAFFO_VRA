@@ -7,6 +7,9 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/Debug.h>
 
+#include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Analysis/IVDescriptors.h>
+
 using namespace llvm;
 using namespace tda;
 using namespace taffo;
@@ -63,6 +66,75 @@ std::shared_ptr<VRAnalyzer> VRAnalyzer::deepClone() const {
     clone->DerivedRanges[value] = cloneValue(info);
 
   return clone;
+}
+
+static const Value* stripCasts(const Value *V) {
+    const Value *Cur = V;
+    while (Cur) {
+        if (auto *Cast = dyn_cast<CastInst>(Cur)) {
+            Cur = Cast->getOperand(0);
+            continue;
+        }
+        if (auto *CE = dyn_cast<ConstantExpr>(Cur)) {
+            if (CE->isCast()) {
+                Cur = CE->getOperand(0);
+                continue;
+            }
+        }
+        if (auto *Op = dyn_cast<Operator>(Cur)) {
+            unsigned opc = Op->getOpcode();
+            if (opc == Instruction::BitCast || opc == Instruction::AddrSpaceCast) {
+                Cur = Op->getOperand(0);
+                continue;
+            }
+        }
+        break;
+    }
+    return Cur;
+};
+
+// return for load and stores its array dimension
+static int getArrayAccessDimFromPtr(const Value *Ptr) {
+  Ptr = stripCasts(Ptr);
+
+  int dims = 0;
+  const Value *Cur = Ptr;
+
+  while (Cur) {
+    Cur = stripCasts(Cur);
+
+    const GEPOperator *GEP = dyn_cast<GEPOperator>(Cur);
+    if (!GEP) break;
+
+    Type *Ty = GEP->getSourceElementType();
+    unsigned pos = 0;
+
+    for (auto It = GEP->idx_begin(); It != GEP->idx_end(); ++It, ++pos) {
+      if (pos == 0)
+        continue;
+
+      if (auto *Arr = dyn_cast<ArrayType>(Ty)) {
+        ++dims;
+        Ty = Arr->getElementType();
+        continue;
+      }
+
+      if (auto *ST = dyn_cast<StructType>(Ty)) {
+        if (auto *CI = dyn_cast<ConstantInt>(It->get())) {
+          unsigned field = CI->getZExtValue();
+          if (field < ST->getNumElements()) {
+            Ty = ST->getElementType(field);
+            continue;
+          }
+        }
+        return -1;
+      }
+    }
+
+    Cur = GEP->getPointerOperand();
+  }
+
+  return dims;
 }
 
 static bool isNewRangeWiden(const std::shared_ptr<Range> OldRange, const std::shared_ptr<Range> NewRange) {
@@ -853,6 +925,39 @@ void VRAnalyzer::fallbackCMP(const Instruction* I) {
   });
 }
 
+size_t VRAnalyzer::compareLoadStoreDim(VRAFunctionInfo VFI, const llvm::Value *load, const llvm::Value *store) {
+
+  const auto *LoadI = dyn_cast<LoadInst>(load);
+  const auto *StoreI = dyn_cast<StoreInst>(store);
+  if (!LoadI || !StoreI)
+    return 0;
+    
+  auto getRootPtr = [&](Instruction *I) -> const Value * {
+    const Value *Ptr = isa<LoadInst>(I) ? cast<LoadInst>(I)->getPointerOperand()
+                                        : cast<StoreInst>(I)->getPointerOperand();
+    if (!Ptr)
+      return nullptr;
+
+    if (auto *PtrV = const_cast<Value *>(Ptr))
+      if (Value *Origin = MemSSAUtils::getOriginPointer(*VFI.MSSA, PtrV))
+        return Origin;
+    return Ptr;
+  };
+  
+  const Value *LoadPtr = getRootPtr(const_cast<LoadInst*>(LoadI));
+  const Value *StorePtr = getRootPtr(const_cast<StoreInst*>(StoreI));
+  if (!LoadPtr || !StorePtr)
+    return 0;
+    
+  const int LoadDim = getArrayAccessDimFromPtr(LoadPtr);
+  const int StoreDim = getArrayAccessDimFromPtr(StorePtr);
+  if (LoadDim < 0 || StoreDim < 0 || LoadDim <= StoreDim)
+    return 0;
+
+  return static_cast<size_t>(LoadDim - StoreDim);
+
+}
+
 void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, bool& isRangeChanged) {
   if (!VRI.RR || TripCount == 0) return;
 
@@ -985,7 +1090,6 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(co
 
   StepRange = handleSub(StepRange, StartRange);
 
-  LLVM_DEBUG(tda::log() << "recognized affine(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
@@ -996,7 +1100,6 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineFlattingRecurren
   auto StepRange = getRange(getNode(VRI.loadHigherDim));
   StepRange = handleSub(StepRange, StartRange);
 
-  LLVM_DEBUG(tda::log() << "recognized affine_flatting(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
@@ -1010,8 +1113,6 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(
   auto StepRange = getRange(getNode(op));
   
   StepRange = handleSub(StepRange, StartRange);
-
-  LLVM_DEBUG(tda::log() << "recognized affine(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
@@ -1022,17 +1123,20 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildFakeStoreRecurrence(VR
 
   auto op = Store->getValueOperand();
   auto StepRange = getRange(getNode(op));
-  LLVM_DEBUG(tda::log() << " step => "<<StepRange->toString() << "\n");
 
   StepRange = StartRange->join(StepRange);
 
-  LLVM_DEBUG(tda::log() << "recognized fake(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<FakeRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
-std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const llvm::StoreInst* Store, std::shared_ptr<taffo::Range> OldRange) {
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(std::shared_ptr<Range> LastStoredRange, const llvm::StoreInst* Store) {
+
   auto op = Store->getValueOperand();
   auto StartRange = getRange(getNode(op));
+
+  if (LastStoredRange)
+    StartRange = LastStoredRange->join(StartRange);
+  
   return std::make_shared<InitRangedRecurrence>(std::move(StartRange));
 }
 

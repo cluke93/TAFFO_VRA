@@ -21,53 +21,6 @@ using namespace llvm;
 
 namespace taffo {
 
-[[nodiscard, maybe_unused]] static bool loadMustWaitForStore(const llvm::LoadInst *Load,
-                                                             const llvm::StoreInst *Store,
-                                                             const llvm::DominatorTree *DT,
-                                                             llvm::MemorySSA *MSSA) {
-    if (!Load || !Store) return false;
-    if (Load->getFunction() != Store->getFunction()) return false;
-
-    // MemorySSA gives an O(1) clobber query. Follow MemoryPhi chains to
-    // recognize stores that reach the load through multiple predecessors.
-    if (MSSA) {
-        if (auto *LAcc = MSSA->getMemoryAccess(Load)) {
-            auto Walker = MSSA->getWalker();
-            auto *Target = MSSA->getMemoryAccess(Store);
-
-            if (Walker && Target) {
-                llvm::MemoryAccess *Clob = Walker->getClobberingMemoryAccess(LAcc);
-                if (Clob == Target)
-                    return true;
-
-                if (auto *Phi = llvm::dyn_cast<llvm::MemoryPhi>(Clob)) {
-                    llvm::SmallVector<llvm::MemoryAccess *, 8> Stack;
-                    Stack.reserve(Phi->getNumOperands());
-                    for (auto &Op : Phi->operands())
-                        Stack.push_back(cast<llvm::MemoryAccess>(Op.get()));
-                    while (!Stack.empty()) {
-                        llvm::MemoryAccess *MA = Stack.pop_back_val();
-                        if (MA == Target) return true;
-                        if (auto *NextPhi = llvm::dyn_cast<llvm::MemoryPhi>(MA)) {
-                            for (auto &Op : NextPhi->operands())
-                                Stack.push_back(cast<llvm::MemoryAccess>(Op.get()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback to instruction-level dominance if available.
-    if (DT)
-        return DT->dominates(Store, Load);
-
-    // Last resort: ordering within the same basic block.
-    const llvm::BasicBlock *LBB = Load->getParent();
-    const llvm::BasicBlock *SBB = Store->getParent();
-    return LBB == SBB && Store->comesBefore(Load);
-}
-
 static bool isLoopLatch(const llvm::Loop* L, llvm::BasicBlock* candidate) {
     llvm::SmallVector<llvm::BasicBlock*, 4> latches;
     L->getLoopLatches(latches);
@@ -142,50 +95,6 @@ static const Value* stripCasts(const Value *V) {
     return Cur;
 };
 
-// return for load and stores its array dimension
-static int getArrayAccessDimFromPtr(const Value *Ptr) {
-  Ptr = stripCasts(Ptr);
-
-  int dims = 0;
-  const Value *Cur = Ptr;
-
-  while (Cur) {
-    Cur = stripCasts(Cur);
-
-    const GEPOperator *GEP = dyn_cast<GEPOperator>(Cur);
-    if (!GEP) break;
-
-    Type *Ty = GEP->getSourceElementType();
-    unsigned pos = 0;
-
-    for (auto It = GEP->idx_begin(); It != GEP->idx_end(); ++It, ++pos) {
-      if (pos == 0)
-        continue;
-
-      if (auto *Arr = dyn_cast<ArrayType>(Ty)) {
-        ++dims;
-        Ty = Arr->getElementType();
-        continue;
-      }
-
-      if (auto *ST = dyn_cast<StructType>(Ty)) {
-        if (auto *CI = dyn_cast<ConstantInt>(It->get())) {
-          unsigned field = CI->getZExtValue();
-          if (field < ST->getNumElements()) {
-            Ty = ST->getElementType(field);
-            continue;
-          }
-        }
-        return -1;
-      }
-    }
-
-    Cur = GEP->getPointerOperand();
-  }
-
-  return dims;
-}
-
 static void printValueName(llvm::raw_ostream &OS, const llvm::Value *V) {
     if (!V) return;
     if (!V->getName().empty()) {
@@ -254,8 +163,21 @@ static std::vector<const llvm::Value *> getInductionFromLoad(const llvm::LoadIns
     Type *Ty = GEP->getSourceElementType();
     unsigned Pos = 0;
     for (auto It = GEP->idx_begin(), E = GEP->idx_end(); It != E && DimIdx.size() < 2; ++It, ++Pos) {
-      if (Pos == 0)
+      if (Pos == 0) {
+        // For flat pointers (e.g., double* or linearized buffers) the first
+        // index is the only meaningful dimension. Keep skipping for true
+        // aggregates so we don't count the leading zero of array GEPs.
+        if (DimIdx.size() < 2 && !llvm::isa<llvm::ArrayType>(Ty) && !llvm::isa<llvm::StructType>(Ty))
+          DimIdx.push_back(It->get());
+
+        // Still advance through nested element types when available.
+        if (auto *ArrTy0 = llvm::dyn_cast<llvm::ArrayType>(Ty))
+          Ty = ArrTy0->getElementType();
+        else if (auto *PtrTy0 = llvm::dyn_cast<llvm::PointerType>(Ty))
+          Ty = PtrTy0->getNonOpaquePointerElementType();
+
         continue;
+      }
 
       if (auto *ArrTy = llvm::dyn_cast<llvm::ArrayType>(Ty)) {
         DimIdx.push_back(It->get());
@@ -277,6 +199,13 @@ static std::vector<const llvm::Value *> getInductionFromLoad(const llvm::LoadIns
         --Pos; // this index does not advance array nesting
         continue;
       }
+
+      // Fallback: handle flat pointer arithmetic (e.g., double* or linearized 2D)
+      // When the source element type is a scalar (not an aggregate), still
+      // consider the index as a dimension so we can recover the induction
+      // variable from patterns like: getelementptr double, ptr %mean, i64 %idx
+      if (DimIdx.size() < 2)
+        DimIdx.push_back(It->get());
     }
 
     Ptr = GEP->getPointerOperand()->stripPointerCasts();
@@ -284,6 +213,8 @@ static std::vector<const llvm::Value *> getInductionFromLoad(const llvm::LoadIns
 
   if (DimIdx.size() == 2)
     std::reverse(DimIdx.begin(), DimIdx.end());
+
+  LLVM_DEBUG(tda::log() << "  getInductionFromLoad collected " << DimIdx.size() << " dim idx\n");
 
   if (DimIdx.empty()) return Result;
 
@@ -503,6 +434,8 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
         bool isRangeChanged = false;
 
         for (llvm::Instruction& I : *curBlock) {
+            unsigned curPos = InstrPos.size();
+            InstrPos.try_emplace(&I, curPos);
             if (CurAnalyzer->requiresInterpretation(&I)) {
                 interpretCall(CurAnalyzer, &I, isRangeChanged);
             } else {
@@ -739,7 +672,6 @@ void ModuleInterpreter::inspect() {
 
                     //add also unkowrn recurrence, for faster widening
                     VFI.addRecurrenceInfo(VRI);
-                    LLVM_DEBUG(tda::log() << " assigned pos " << VFI.RRs_pos[VRI.root] << " \n");
                 }
             }
         }
@@ -1135,7 +1067,7 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
             
             VRI.depsOnFn.clear();
         } else {
-            LLVM_DEBUG(tda::log() << " operando call invariante, posso usare il suo range ");
+            LLVM_DEBUG(tda::log() << " call invariant operand, cur range usable\n");
         }
     }
     else if (!VLI.isInvariant(cur)) {
@@ -1154,19 +1086,22 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
                 // if idx solved check base BE CAREFUL: IMPLEMENT DOMINANCE BETWEEN L/S INSTR
                 const Value *LoadBase = getBaseMemoryObject(Load->getPointerOperand());
                 if (LoadBase) {
-                    for (auto [R, RR] : VFI.RRs) {
+                    
+                    if (VRI.loadJunction && IVs.size() > getInductionFromLoad(VRI.loadJunction, VFI.LI).size()) {
+                        LLVM_DEBUG(tda::log() << " found load from array with higher dim: " << Load << "\n");
+                        VRI.loadHigherDim = dyn_cast<LoadInst>(Load);
+                    }
+
+                    for (auto [_, VF] : FNs)
+                    for (auto [R, RR] : VF.RRs) {
                         const auto *RootStore = dyn_cast<StoreInst>(R);
                         if (!RootStore || R == VRI.root) continue;
-                        
+                        // LLVM_DEBUG(tda::log() << "\ncheck su ricorrenza " << R << "\n");
                         const Value *RootBase = getBaseMemoryObject(RootStore->getPointerOperand());
                         
-                        if (getArrayAccessDimFromPtr(Load->getPointerOperand()) > getArrayAccessDimFromPtr(RootStore->getPointerOperand())) {
-                            LLVM_DEBUG(tda::log() << " attenzzioonee ");
-                            VRI.loadHigherDim = Load;
-                        }
-                        
-                        if (RootBase != LoadBase) continue;
-                        if (!RR.lastRange && loadMustWaitForStore(Load, RootStore, VFI.DT, VFI.MSSA)) {
+                        // LLVM_DEBUG(if (isBefore(R, Load)) { tda::log() << " >> E' PRIMA DI "<<Load << " "; });
+
+                        if (!RR.lastRange && isBefore(R, Load)) {
                             VRI.depsOnRR.push_back(const_cast<llvm::Value*>(R));
                             LLVM_DEBUG(tda::log() << " dep on past store unsolved ");
                             return false;
@@ -1175,6 +1110,7 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
                 }
                 return true;
             }
+            
         } else {
 
             if (!VFI.RRs.count(cur)) {
@@ -1353,31 +1289,33 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
             if (RR) {
                 VRI.RR = RR;
                 solvedRR.push_back(VRI.root);
+                LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
             }
         }
 
     } else if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(VRI.root)) {
-LLVM_DEBUG(tda::log() << " (1) ");
+        
         bool isSolvable = VRI.chain.size() > 0;
         for (const auto* RRNode : VRI.chain) {
-            if (!isAffineBinaryOp(RRNode)) { LLVM_DEBUG(tda::log() << " (KO) "); return false; }
+            if (!isAffineBinaryOp(RRNode)) return false;
             const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
             isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VRI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VRI);
         }
-LLVM_DEBUG(tda::log() << " (2) ");
+        
         if (!isSolvable) {
             LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
             return true;
         }
-LLVM_DEBUG(tda::log() << " (3) ");
+        
         // affine case 1: load from higher dimensional array
-        if (VRI.loadHigherDim) { LLVM_DEBUG(tda::log() << " (4) ");
-            if (auto *latch = L->getLoopLatch()) { LLVM_DEBUG(tda::log() << " (6) ");
+        if (VRI.loadHigherDim) {
+            if (auto *latch = L->getLoopLatch()) {
                 auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
                 std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildAffineFlattingRecurrence(VRI, Store);
-                if (RR) { 
+                if (RR) {
                     VRI.RR = RR;
                     solvedRR.push_back(VRI.root);
+                    LLVM_DEBUG(tda::log() << "recognized flatten_"<<RR->toString()<<" \n\n");
                 }
             }
         }
@@ -1385,7 +1323,7 @@ LLVM_DEBUG(tda::log() << " (3) ");
         //affine case 2: same base with index delta == 1
         else if (getBaseMemoryObject(Store->getPointerOperand()) == getBaseMemoryObject(VRI.loadJunction->getPointerOperand())) {
             const Value *StoreIdx = getIndexOperand(Store->getPointerOperand());
-            const Value *LoadIdx = getIndexOperand(VRI.loadJunction->getPointerOperand()); LLVM_DEBUG(tda::log() << " (5) ");
+            const Value *LoadIdx = getIndexOperand(VRI.loadJunction->getPointerOperand());
 
             int64_t StoreOff = 0;
             int64_t LoadOff = 0;
@@ -1396,8 +1334,6 @@ LLVM_DEBUG(tda::log() << " (3) ");
             
             const int64_t delta = StoreOff - LoadOff;
             if (std::abs(delta) != 1) return false;
-            
-            // Possiamo usare lo scope allo stato Sn il quale è stato già oggetto di preseeding (S1) oppure propagation (St con t num iterazioni)
 
             if (auto *latch = L->getLoopLatch()) {
                 auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
@@ -1405,12 +1341,27 @@ LLVM_DEBUG(tda::log() << " (3) ");
                 if (RR) {
                     VRI.RR = RR;
                     solvedRR.push_back(VRI.root);
+                    LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
                 }
             }
         }
-
+        
     }
     return true;
+}
+
+std::shared_ptr<Range> ModuleInterpreter::getLastStoredRange(const llvm::Value* BaseStore) {
+    std::shared_ptr<Range> joinedR = nullptr;
+    for (auto [_, FN] : FNs) {
+        for (auto [R, RR] : FN.RRs) {
+            if (auto Store = dyn_cast<StoreInst>(R)) {
+                if (getBaseMemoryObject(Store->getPointerOperand()) != BaseStore || !RR.lastRange) continue;
+                if (!joinedR) joinedR = RR.lastRange;
+                else joinedR = joinedR->join(RR.lastRange);
+            }
+        }
+    }
+    return joinedR;
 }
 
 /**
@@ -1426,16 +1377,14 @@ bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
     llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
     VRALoopInfo &VLI = VFI.loops[L];
 
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
-    auto OldRange = GStore->fetchRange(VRI.root);
-    LLVM_DEBUG(tda::log() << " il vecchio range era " << (OldRange ? OldRange->toString() : " (null) ") << " -");
-
     if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(VRI.root)) {
         
         if (!isSolvableDependenceTreeBackwark(Store->getValueOperand(), L, VRI)) {
             LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvale yet: it depends on other unsolved recurrences\n");
             return true;
         }
+
+        auto lastStored = getLastStoredRange(getBaseMemoryObject(Store->getPointerOperand()));
 
         std::shared_ptr<RangedRecurrence> RR;
         if (isa<llvm::ConstantInt>(Store->getValueOperand()) || isa<llvm::ConstantFP>(Store->getValueOperand())) {
@@ -1449,6 +1398,9 @@ bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
             }
 
             auto StartRange = Range::Point(ConstVal).clone();
+            if (lastStored) {
+                StartRange = StartRange->join(lastStored);
+            }
             RR = std::make_shared<InitRangedRecurrence>(std::move(StartRange));
         } else if (isa<Constant>(Store->getValueOperand())) {
             //other non numeric constant
@@ -1456,7 +1408,7 @@ bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
         } else {
             auto SFV = std::static_pointer_cast<VRAnalyzer>(getStoreForValue(Store->getValueOperand()));
             if (!SFV) return true;
-            RR = SFV->buildInitRecurrence(Store, OldRange);            
+            RR = SFV->buildInitRecurrence(lastStored, Store);
         }
 
         if (RR) {

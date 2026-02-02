@@ -83,7 +83,6 @@ struct VRAFunctionInfo {
     llvm::SmallVector<llvm::BasicBlock*> bbFlow;
     llvm::DenseMap<const llvm::Loop*, VRALoopInfo> loops;
     llvm::DenseMap<const llvm::Value*, VRARecurrenceInfo> RRs;
-    llvm::DenseMap<const llvm::Value*, unsigned> RRs_pos;
     FunctionScope scope;
 
     std::shared_ptr<Range> lastRange;
@@ -105,17 +104,6 @@ struct VRAFunctionInfo {
 
     void addRecurrenceInfo(VRARecurrenceInfo RI) {
         RRs.try_emplace(RI.root, RI);
-        RRs_pos.try_emplace(RI.root, RRs.size());
-    }
-
-    bool isRRBefore(const llvm::Value *V1, const llvm::Value *V2) const {
-        auto I1 = RRs_pos.find(V1);
-        auto I2 = RRs_pos.find(V2);
-
-        if (I1 == RRs_pos.end() || I2 == RRs_pos.end())
-            return false;
-
-        return I1->second < I2->second;
     }
 
     size_t countLoops() { return loops.size(); }
@@ -189,6 +177,7 @@ protected:
     // add here new recurrences...
 
     const llvm::Value* matchIVOffset(VRAFunctionInfo VFI, const llvm::Value *Idx, int64_t &Offset, llvm::Loop *L);
+    std::shared_ptr<Range> getLastStoredRange(const llvm::Value* BaseStore);
 
     // 4) TRIP COUNT METHODS
     void tripCount();
@@ -225,6 +214,16 @@ protected:
         return num_rr;
     }
 
+    bool isBefore(const llvm::Value *V1, const llvm::Value *V2) const {
+        auto I1 = InstrPos.find(V1);
+        auto I2 = InstrPos.find(V2);
+
+        if (I1 == InstrPos.end() || I2 == InstrPos.end())
+            return false;
+
+        return I1->second < I2->second;
+    }
+
 private:
 
     llvm::Module& M;
@@ -238,6 +237,8 @@ private:
     llvm::SmallVector<const llvm::Value*> solvedRR;
     u_int16_t solvedTC;
     u_int64_t propagationChanging;
+
+    llvm::DenseMap<const llvm::Value*, unsigned> InstrPos;
 };
 
 }
