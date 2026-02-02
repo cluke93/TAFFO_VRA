@@ -5,6 +5,8 @@
 
 #include <llvm/IR/Dominators.h>
 #include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/MemorySSA.h>
+
 #include <memory>
 #define DEBUG_TYPE "taffo-vra"
 namespace taffo {
@@ -81,6 +83,7 @@ struct VRAFunctionInfo {
     llvm::SmallVector<llvm::BasicBlock*> bbFlow;
     llvm::DenseMap<const llvm::Loop*, VRALoopInfo> loops;
     llvm::DenseMap<const llvm::Value*, VRARecurrenceInfo> RRs;
+    llvm::DenseMap<const llvm::Value*, unsigned> RRs_pos;
     FunctionScope scope;
 
     std::shared_ptr<Range> lastRange;
@@ -89,6 +92,7 @@ struct VRAFunctionInfo {
     llvm::DominatorTree* DT = nullptr;
     llvm::LoopInfo* LI = nullptr;
     llvm::ScalarEvolution* SE = nullptr;
+    llvm::MemorySSA* MSSA = nullptr;
 
     VRAFunctionInfo(): F(nullptr) {}
     VRAFunctionInfo(llvm::Function* F, llvm::ModuleAnalysisManager& MAM): F(F) {
@@ -96,6 +100,22 @@ struct VRAFunctionInfo {
         LI = &(FAM.getResult<llvm::LoopAnalysis>(*F));
         DT = &(FAM.getResult<llvm::DominatorTreeAnalysis>(*F));
         SE = &(FAM.getResult<llvm::ScalarEvolutionAnalysis>(*F));
+        MSSA = &(FAM.getResult<llvm::MemorySSAAnalysis>(*F).getMSSA());
+    }
+
+    void addRecurrenceInfo(VRARecurrenceInfo RI) {
+        RRs.try_emplace(RI.root, RI);
+        RRs_pos.try_emplace(RI.root, RRs.size());
+    }
+
+    bool isRRBefore(const llvm::Value *V1, const llvm::Value *V2) const {
+        auto I1 = RRs_pos.find(V1);
+        auto I2 = RRs_pos.find(V2);
+
+        if (I1 == RRs_pos.end() || I2 == RRs_pos.end())
+            return false;
+
+        return I1->second < I2->second;
     }
 
     size_t countLoops() { return loops.size(); }
@@ -186,6 +206,7 @@ protected:
 
     // resolve all locked loops and RR after last iteration and iterate one again
     void fallback();
+    void fallbackCMP();
 
     // Statistic methods
     size_t countLoops() {

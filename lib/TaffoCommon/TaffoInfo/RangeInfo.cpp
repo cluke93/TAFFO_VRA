@@ -225,6 +225,30 @@ Range Range::narrow(const Range& R) const {
   return out;
 }
 
+std::shared_ptr<Range> Range::meet(const std::shared_ptr<Range>& R) const {
+  if (!R) return clone();
+  auto res = meet(*R);
+  return std::make_shared<Range>(std::move(res));
+}
+
+std::shared_ptr<Range> Range::join(const std::shared_ptr<Range>& R) const {
+  if (!R) return clone();
+  auto res = join(*R);
+  return std::make_shared<Range>(std::move(res));
+}
+
+std::shared_ptr<Range> Range::widen(const std::shared_ptr<Range>& R) const {
+  if (!R) return clone();
+  auto res = widen(*R);
+  return std::make_shared<Range>(std::move(res));
+}
+
+std::shared_ptr<Range> Range::narrow(const std::shared_ptr<Range>& R) const {
+  if (!R) return clone();
+  auto res = narrow(*R);
+  return std::make_shared<Range>(std::move(res));
+}
+
 Range Range::Point(const llvm::APFloat& V) {
   return Range(V,V);
 }

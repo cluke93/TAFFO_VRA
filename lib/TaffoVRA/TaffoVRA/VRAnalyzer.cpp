@@ -875,21 +875,10 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
     } else {
       joinedRange = std::make_shared<Range>(rangeAtZero->join(*rangeAtTC));
     }
-
-    // Clamp the recurrence result to the actual value being stored, if known,
-    // to avoid widening caused by legacy annotations (e.g., old init ranges).
-    if (const auto *StoreRoot = dyn_cast<StoreInst>(VRI.root)) {
-      if (auto OperandRange = fetchRange(StoreRoot->getValueOperand())) {
-        auto intersected = std::make_shared<Range>(joinedRange->meet(*OperandRange));
-        // keep the tighter one if meet is valid
-        if (intersected->min <= intersected->max)
-          joinedRange = intersected;
-      }
-    }
     
     VRI.lastRange = joinedRange;
     VRI.lastRangeComputedAt = TripCount;
-    LLVM_DEBUG(tda::log() << " resolved RR " << VRI.root->getName() << ".at("<<TripCount<<") ");
+    LLVM_DEBUG(tda::log() << " resolved RR " << *VRI.root << ".at("<<TripCount<<") ");
     isRangeChanged = true; // with new solved RR is always changed = true
 
     if (auto* PN = dyn_cast<PHINode>(VRI.root)) {
@@ -904,7 +893,7 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
       }
       return;
     } else if (auto Store = dyn_cast<StoreInst>(VRI.root)) {
-
+      
       const Value* AddressParam = Store->getPointerOperand();
       const Value* ValueParam = Store->getValueOperand();
 
@@ -915,29 +904,19 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
 
       if (!ValueNode && !ValueParam->getType()->isPointerTy())
         ValueNode = fetchRangeNode(VRI.root);
-
-      // push the resolved recurrence range (clamped by the operand, if known)
-      // onto the stored value so the base pointer receives tightened bounds
+        
       if (!ValueParam->getType()->isPointerTy()) {
-        std::shared_ptr<Range> finalRange = joinedRange;
-        if (auto OpRange = fetchRange(ValueParam)) {
-          finalRange = std::make_shared<Range>(finalRange->meet(*OpRange));
-        }
-
         if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
           auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
-          Cloned->range = finalRange;
+          Cloned->range = joinedRange;
           ValueNode = Cloned;
         } else if (!ValueNode) {
-          // fallback: create a fresh scalar node with the resolved range
-          ValueNode = std::make_shared<ScalarInfo>(nullptr, finalRange);
+          ValueNode = std::make_shared<ScalarInfo>(nullptr, joinedRange);
         }
       }
 
       storeNode(AddressNode, ValueNode);
-      const std::shared_ptr<Range> newInfo = getRange(ValueNode);
-      // if (newInfo) LLVM_DEBUG(tda::log() << " STORE NEW_RANGE = "<<newInfo->toString() << " ");
-      LLVM_DEBUG(Logger->logRangeln(newInfo));
+      LLVM_DEBUG(Logger->logRangeln(joinedRange));
       return;
     }
   }
@@ -976,27 +955,19 @@ void VRAnalyzer::retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInf
 
       if (!ValueNode && !ValueParam->getType()->isPointerTy())
         ValueNode = fetchRangeNode(VRI.root);
-
-      // Make sure the stored value reflects the solved recurrence bounds
+        
       if (!ValueParam->getType()->isPointerTy()) {
-        std::shared_ptr<Range> finalRange = VRI.lastRange;
-        if (auto OpRange = fetchRange(ValueParam)) {
-          finalRange = std::make_shared<Range>(finalRange->meet(*OpRange));
-        }
-
         if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
           auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
-          Cloned->range = finalRange;
+          Cloned->range = VRI.lastRange;
           ValueNode = Cloned;
         } else if (!ValueNode) {
-          ValueNode = std::make_shared<ScalarInfo>(nullptr, finalRange);
+          ValueNode = std::make_shared<ScalarInfo>(nullptr, VRI.lastRange);
         }
       }
 
       storeNode(AddressNode, ValueNode);
-      const std::shared_ptr<Range> newInfo = getRange(ValueNode);
-      // if (newInfo) LLVM_DEBUG(tda::log() << " STORE NEW_RANGE = "<<newInfo->toString() << " ");
-      LLVM_DEBUG(Logger->logRangeln(newInfo));
+      LLVM_DEBUG(Logger->logRangeln(VRI.lastRange));
       return;
     }
 
@@ -1044,32 +1015,25 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
-std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const llvm::StoreInst* Store, std::shared_ptr<taffo::Range> OldRange) {
-  
-  const Value* AddressParam = Store->getPointerOperand();
-  const Value* ValueParam = Store->getValueOperand();
-  
-  if (isa<ConstantPointerNull>(ValueParam)) return nullptr;
-  std::shared_ptr<ValueInfo> AddressNode = getNode(AddressParam);
-  std::shared_ptr<ValueInfo> ValueNode = getNode(ValueParam);
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildFakeStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
 
-  std::shared_ptr<Range> StartRange = OldRange ? OldRange->clone() : Range::Top().clone();
+  auto StartRange = getRange(getNode(VRI.loadJunction));
+  if (!StartRange) StartRange = Range::Top().clone();
 
-  if (!ValueNode && !ValueParam->getType()->isPointerTy())
-    ValueNode = fetchRangeNode(Store);
-    
-  // Use defensive copies to avoid later widening mutating the recurrence seed.
-  std::shared_ptr<Range> CurrentValRange = getRange(ValueNode);
-  if (CurrentValRange)
-    CurrentValRange = CurrentValRange->clone();
+  auto op = Store->getValueOperand();
+  auto StepRange = getRange(getNode(op));
+  LLVM_DEBUG(tda::log() << " step => "<<StepRange->toString() << "\n");
 
-  
-  std::shared_ptr<Range> StepRange = !StartRange->isTop() && isNewRangeWiden(StartRange, CurrentValRange)
-                                         ? StartRange->clone()
-                                         : (CurrentValRange ? CurrentValRange->clone() : Range::Top().clone());
+  StepRange = StartRange->join(StepRange);
 
-  LLVM_DEBUG(tda::log() << "recognized init(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
+  LLVM_DEBUG(tda::log() << "recognized fake(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<FakeRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(const llvm::StoreInst* Store, std::shared_ptr<taffo::Range> OldRange) {
+  auto op = Store->getValueOperand();
+  auto StartRange = getRange(getNode(op));
+  return std::make_shared<InitRangedRecurrence>(std::move(StartRange));
 }
 
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildGeometricPHIRecurrence(const llvm::PHINode *phi) {

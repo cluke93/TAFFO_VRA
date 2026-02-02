@@ -88,6 +88,11 @@ struct Range : public Serializable, public tda::Printable {
   Range widen(const Range& R) const;
   Range narrow(const Range& R) const;
 
+  std::shared_ptr<Range> meet(const std::shared_ptr<Range>& R) const;
+  std::shared_ptr<Range> join(const std::shared_ptr<Range>& R) const;
+  std::shared_ptr<Range> widen(const std::shared_ptr<Range>& R) const;
+  std::shared_ptr<Range> narrow(const std::shared_ptr<Range>& R) const;
+
   // ===== DEBUG / STORAGE =====
 
   std::string toString() const override;
