@@ -7,6 +7,7 @@
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Debug.h>
+#include <llvm/Support/raw_ostream.h>
 
 #define DEBUG_TYPE "taffo-vra"
 
@@ -59,6 +60,7 @@ PreservedAnalyses ValueRangeAnalysisPass::run(Module& M, ModuleAnalysisManager& 
   } else {
     ModuleInterpreter ModInt(M, AM, GlobalStore);
     ModInt.interpret();
+    ModInt.printRecurrenceSummary(llvm::errs());
   }
 
   LLVM_DEBUG(log() << "saving results...\n");

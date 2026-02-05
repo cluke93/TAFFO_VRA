@@ -382,21 +382,17 @@ void VRAnalyzer::returnFromCallPropagation(Instruction* I, std::shared_ptr<Analy
   else if (std::shared_ptr<ValueInfoWithRange> RetRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(Ret)) {
     
     const std::shared_ptr<Range> newInfo = getRange(RetRange);
-    if (isNewRangeWiden(newInfo, oldInfo)) {
-      LLVM_DEBUG(tda::log() << " NARROWING FROM OLD_RANGE = "<< (oldInfo ? oldInfo->toString() : "(none)") << " TO "<< (oldInfo ? newInfo->toString() : "(none)"));
-      isRangeChanged = true;
-      saveValueRange(I, newInfo);
-    } else if (isRangeChanged) {
+    if (isRangeChanged) {
 
       saveValueRange(I, RetRange);
       isRangeChanged = isNewRangeWiden(oldInfo, newInfo);
       if (isRangeChanged) {
-        LLVM_DEBUG(tda::log() << " (range widen) ");
+        VFI.lastRange = newInfo;
       }
 
     } else {
       saveValueRange(I, VFI.lastRange);
-      LLVM_DEBUG(tda::log() <<" retrieved past range "<<VFI.lastRange->toString());
+      //LLVM_DEBUG(tda::log() <<" retrieved past range "<<VFI.lastRange->toString());
     }
     LLVM_DEBUG(logRangeln(I));
   }
@@ -775,9 +771,6 @@ void VRAnalyzer::handlePhiNode(const Instruction* phi, bool& isRangeChanged) {
     return;
   LLVM_DEBUG(Logger->logInstruction(phi));
   auto res = copyRange(getGlobalStore()->getUserInput(phi));
-  
-  const std::shared_ptr<Range> oldInfo = fetchRange(phi_n);
-  LLVM_DEBUG(tda::log() << " PHI OLD_RANGE = "<< (oldInfo ? oldInfo->toString() : "(none)") << " ");
 
   for (unsigned index = 0U; index < phi_n->getNumIncomingValues(); index++) {
     const Value* op = phi_n->getIncomingValue(index);
@@ -786,11 +779,6 @@ void VRAnalyzer::handlePhiNode(const Instruction* phi, bool& isRangeChanged) {
       continue;
     if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
       res = getUnionRange(res, op_range);
-
-      const std::shared_ptr<Range> newInfo = fetchRange(phi_n);
-      if (newInfo) LLVM_DEBUG(tda::log() << " PHI NEW_RANGE = "<<newInfo->toString() << " ");
-      isRangeChanged = isNewRangeWiden(oldInfo, newInfo);
-
     }
     else {
       setNode(phi, op_node);
@@ -811,10 +799,10 @@ void VRAnalyzer::analyzePHIStartInstruction(llvm::Instruction* I, bool& isRangeC
   LLVM_DEBUG(Logger->logInstruction(I));
 
   const Value* op = phi_n->getIncomingValue(0);
+  if (!fetchRange(op)) return;
   std::shared_ptr<ValueInfo> op_node = getNode(op);
   if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
-    const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
-    setNode(I, op_range);
+    setNode(I, copyRange(op_range));
     LLVM_DEBUG(Logger->logRangeln(op_range));
   } else {
     LLVM_DEBUG(tda::log() << "unable to retreve start operand of phi node\n");
@@ -959,15 +947,7 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
 
   if (TripCount > 0) {
 
-    auto rangeAtZero = VRI.RR->at(0);
-    auto rangeAtTC = VRI.RR->at(TripCount);
-
-    std::shared_ptr<taffo::Range> joinedRange;
-    if (!rangeAtZero || rangeAtZero == Range::Top().clone()) {
-      joinedRange = rangeAtTC;
-    } else {
-      joinedRange = std::make_shared<Range>(rangeAtZero->join(*rangeAtTC));
-    }
+    auto joinedRange = getRRJoinedRange(VRI.RR.get(), TripCount);
     
     VRI.lastRange = joinedRange;
     VRI.lastRangeComputedAt = TripCount;
@@ -979,10 +959,22 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount, b
       const Value* op = PN->getIncomingValue(0);
       std::shared_ptr<ValueInfo> op_node = getNode(op);
       if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
-        const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
-        s_op->range = joinedRange;
-        setNode(VRI.root, s_op);
-        LLVM_DEBUG(Logger->logRangeln(op_range));
+        // Do NOT mutate the operand's ScalarInfo, otherwise we pollute the
+        // range of the constant/initial value (e.g., 0.0) and reuse it later.
+        // Instead, build a fresh node for the PHI.
+        auto phiStart = std::make_shared<ScalarInfo>(nullptr, joinedRange);
+        setNode(VRI.root, phiStart);
+        LLVM_DEBUG(Logger->logRangeln(phiStart));
+
+        if (auto outerRR = dyn_cast<AffineDeltaRangedRecurrence>(VRI.RR)) {
+          LLVM_DEBUG(tda::log() << "\n\tè una delta, necessita update inner RR da ultimo start\n");
+          auto curRRStep = outerRR->getInnerRR()->getStep()->clone();
+
+          auto& innerVRI = ModInt->getVRARecurrenceInfo(VRI.innerRR);
+          innerVRI.RR = std::make_shared<AffineRangedRecurrence>(getRRJoinedRange(VRI.RR.get(), TripCount - 1), std::move(curRRStep));
+          innerVRI.lastRange = getRRJoinedRange(innerVRI.RR.get(), innerVRI.lastRangeComputedAt);
+          LLVM_DEBUG(tda::log() << "\t\treplaced with "<<innerVRI.RR->toString()<<"\n");
+        }
       }
       return;
     } else if (auto Store = dyn_cast<StoreInst>(VRI.root)) {
@@ -1081,18 +1073,78 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(co
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
-std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildPHIAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* PHI) {
 
-  auto StartRange = getRange(getNode(VRI.loadJunction));
-
+  auto StartRange = getRange(getNode(PHI->getIncomingValue(0)));
   auto StepRange = getRange(getNode(VRI.loadHigherDim));
-
-  LLVM_DEBUG(tda::log() << " LJ = " << VRI.loadJunction);
-  LLVM_DEBUG(tda::log() << " HD = " << VRI.loadHigherDim);
 
   StepRange = handleSub(StepRange, StartRange);
 
-  return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+  return std::make_shared<AffineFlattinedRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
+
+  auto StartRange = getRange(getNode(VRI.loadJunction));
+  auto StepRange = getRange(getNode(VRI.loadHigherDim));
+
+  StepRange = handleSub(StepRange, StartRange);
+
+  return std::make_shared<AffineFlattinedRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) {
+
+  auto InnerAffine = llvm::dyn_cast<AffineRangedRecurrence>(InnerVRI->RR);
+
+  const Value* op = phi->getIncomingValue(0);
+  std::shared_ptr<ValueInfo> op_node = getNode(op);
+  std::shared_ptr<Range> StartRange = getRange(op_node);
+
+  const Value* op_1 = phi->getIncomingValue(1);
+  std::shared_ptr<ValueInfo> op_node_1 = getNode(op_1);
+  std::shared_ptr<Range> OuterIncomingRange = getRange(op_node_1);
+  
+  std::shared_ptr<Range> InnerComputedRange = nullptr;
+  if (InnerAffine && InnerVRI->lastRangeComputedAt > 0) {
+    InnerComputedRange = InnerAffine->at(InnerVRI->lastRangeComputedAt);
+  }
+  if (!InnerComputedRange)
+    InnerComputedRange = InnerVRI->lastRange;
+
+  if (OuterIncomingRange) {
+    auto InnerRangeUsed = getRange(getNode(InnerVRI->root));
+    if (InnerRangeUsed && InnerComputedRange) {
+      double dMin = InnerComputedRange->min - InnerRangeUsed->min;
+      double dMax = InnerComputedRange->max - InnerRangeUsed->max;
+      OuterIncomingRange = std::make_shared<Range>(OuterIncomingRange->min + dMin,
+                                                   OuterIncomingRange->max + dMax);
+    }
+  }
+
+  std::shared_ptr<Range> StepRange = nullptr;
+  if (OuterIncomingRange && InnerComputedRange) {
+    StepRange = std::make_shared<Range>(OuterIncomingRange->min - InnerComputedRange->min,
+                                        OuterIncomingRange->max - InnerComputedRange->max);
+  }
+
+  return std::make_shared<AffineDeltaRangedRecurrence>(std::move(StartRange), std::move(StepRange), std::move(InnerAffine), InnerVRI->lastRangeComputedAt);
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildDeltaAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store, VRARecurrenceInfo* InnerVRI) {
+
+  // const Value* op = phi->getIncomingValue(0);
+  // std::shared_ptr<ValueInfo> op_node = getNode(op);
+  // std::shared_ptr<Range> StartRange = getRange(op_node);
+
+  // const Value* op_1 = phi->getIncomingValue(1);
+  // std::shared_ptr<ValueInfo> op_node_1 = getNode(op_1);
+  // std::shared_ptr<Range> StepRange = getRange(op_node_1);
+
+  // StepRange = handleSub(StepRange, StartRange);
+
+  // return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+  return nullptr;
 }
 
 // valid when delta index is 1
@@ -1168,4 +1220,19 @@ std::shared_ptr<RangedRecurrence> VRAnalyzer::buildUnknownRecurrence(const llvm:
 
   LLVM_DEBUG(tda::log() << "recognized unknown(start= " << (StartRange ? StartRange->toString() : "(none)") << ", step= " << StepRange->toString() << ")\n\n");
   return std::make_shared<AffineRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+
+std::shared_ptr<Range> VRAnalyzer::getRRJoinedRange(RangedRecurrence* RR, u_int64_t TC) {
+
+  auto rangeAtZero = RR->at(0);
+  auto rangeAtTC = RR->at(TC);
+
+  std::shared_ptr<taffo::Range> joinedRange;
+  if (!rangeAtZero || rangeAtZero == Range::Top().clone()) {
+    joinedRange = rangeAtTC;
+  } else {
+    joinedRange = std::make_shared<Range>(rangeAtZero->join(*rangeAtTC));
+  }
+  return joinedRange;
 }

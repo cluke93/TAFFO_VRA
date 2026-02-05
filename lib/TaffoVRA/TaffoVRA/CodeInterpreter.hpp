@@ -83,7 +83,13 @@ public:
   virtual std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildFakeStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
-  virtual std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
+
+  virtual std::shared_ptr<RangedRecurrence> buildPHIAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
+
+  virtual std::shared_ptr<RangedRecurrence> buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildDeltaAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) = 0;
+
   virtual std::shared_ptr<RangedRecurrence> buildInitRecurrence(std::shared_ptr<Range> LastStoredRange, const llvm::StoreInst *store) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildGeometricPHIRecurrence(const llvm::PHINode *phi) = 0;

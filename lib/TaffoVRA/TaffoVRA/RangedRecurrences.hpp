@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <type_traits>
 #include <string>
 #include <vector>
 #include <functional>
@@ -79,6 +80,9 @@ public:
     : Start(std::move(start)) {}
 
   Kind kind() const noexcept override { return Kind::Init; }
+  static bool classof(const RangedRecurrence* RR) {
+    return RR && RR->kind() == Kind::Init;
+  }
   std::shared_ptr<Range> at(std::uint64_t) const override;
   std::string toString() const override;
 
@@ -98,6 +102,9 @@ public:
     : Start(std::move(start)), Step(std::move(step)) {}
 
   Kind kind() const noexcept override { return Kind::Fake; }
+  static bool classof(const RangedRecurrence* RR) {
+    return RR && RR->kind() == Kind::Fake;
+  }
   std::shared_ptr<Range> at(std::uint64_t i) const override;
   std::string toString() const override;
 
@@ -178,6 +185,8 @@ public:
 
   const std::shared_ptr<Range>& getStart() const noexcept { return Start; }
   const std::shared_ptr<Range>& getStep()  const noexcept { return Step;  }
+  const std::shared_ptr<AffineRangedRecurrence>& getInnerRR()  const noexcept { return InnerAffine; }
+  const u_int64_t getInnerTC()  const noexcept { return InnerTC;  }
 
 private:
   std::shared_ptr<Range> Start;
@@ -304,6 +313,9 @@ public:
     : Start(std::move(start)), Ratio(std::move(ratio)) {}
 
   Kind kind() const noexcept override { return Kind::Geometric; }
+  static bool classof(const RangedRecurrence* RR) {
+    return RR && RR->kind() == Kind::Geometric;
+  }
   std::shared_ptr<Range> at(std::uint64_t i) const override;
   std::string toString() const override;
   void print(llvm::raw_ostream& OS) const override { OS << toString(); }
@@ -330,6 +342,9 @@ public:
       B(std::move(b)) {}
 
   Kind kind() const noexcept override { return Kind::Linear; }
+  static bool classof(const RangedRecurrence* RR) {
+    return RR && RR->kind() == Kind::Linear;
+  }
 
   std::shared_ptr<Range> at(std::uint64_t i) const override;
 
@@ -357,3 +372,45 @@ private:
 };
 
 } // namespace taffo
+
+namespace llvm {
+template <class To>
+struct isa_impl_cl<To, std::shared_ptr<taffo::RangedRecurrence>> {
+  static inline bool doit(const std::shared_ptr<taffo::RangedRecurrence> &Val) {
+    return isa_impl_cl<To, taffo::RangedRecurrence *>::doit(Val.get());
+  }
+};
+
+template <class To>
+struct isa_impl_cl<To, const std::shared_ptr<taffo::RangedRecurrence>> {
+  static inline bool doit(const std::shared_ptr<taffo::RangedRecurrence> &Val) {
+    return isa_impl_cl<To, taffo::RangedRecurrence *>::doit(Val.get());
+  }
+};
+
+template <class To>
+struct cast_retty_impl<To, std::shared_ptr<taffo::RangedRecurrence>> {
+  using ret_type = std::shared_ptr<To>;
+};
+
+template <class To>
+struct cast_retty_impl<To, const std::shared_ptr<taffo::RangedRecurrence>> {
+  using ret_type = std::shared_ptr<const To>;
+};
+
+template <class To>
+struct cast_convert_val<To, std::shared_ptr<taffo::RangedRecurrence>, std::shared_ptr<taffo::RangedRecurrence>> {
+  static inline typename cast_retty<To, std::shared_ptr<taffo::RangedRecurrence>>::ret_type
+  doit(const std::shared_ptr<taffo::RangedRecurrence> &Val) {
+    return std::static_pointer_cast<To>(Val);
+  }
+};
+
+template <class To>
+struct cast_convert_val<To, const std::shared_ptr<taffo::RangedRecurrence>, std::shared_ptr<taffo::RangedRecurrence>> {
+  static inline typename cast_retty<To, const std::shared_ptr<taffo::RangedRecurrence>>::ret_type
+  doit(const std::shared_ptr<taffo::RangedRecurrence> &Val) {
+    return std::static_pointer_cast<const To>(Val);
+  }
+};
+} // namespace llvm

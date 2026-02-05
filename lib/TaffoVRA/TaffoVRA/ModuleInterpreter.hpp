@@ -7,8 +7,12 @@
 #include <llvm/Analysis/ScalarEvolution.h>
 #include <llvm/Analysis/MemorySSA.h>
 
+#include <cstdint>
 #include <memory>
+#include <map>
+#include <string>
 #define DEBUG_TYPE "taffo-vra"
+namespace llvm { class raw_ostream; }
 namespace taffo {
 
 class Range;
@@ -54,16 +58,24 @@ struct VRALoopInfo {
 
 enum VRAInspectionKind {
     REC,        // known recurrence
-    INIT,       // initialization
+    ASSIGN,       // assignation
     UNKNOWN     // unhandled
+};
+
+struct RecurrenceSummary {
+    std::map<std::string, std::uint64_t> counts;
+    std::uint64_t unsolved = 0;
 };
 
 struct VRARecurrenceInfo {
     const llvm::Value* root;
     llvm::SmallVector<const llvm::Value*> chain;
     VRAInspectionKind kind;
+
+    // reference to build specialized affine/geo recurrence
     const llvm::LoadInst* loadJunction = nullptr;
     const llvm::LoadInst* loadHigherDim = nullptr;
+    const llvm::Value* innerRR = nullptr;
 
     llvm::SmallVector<llvm::Function*> depsOnFn;
     llvm::SmallVector<llvm::Value*> depsOnRR;
@@ -129,6 +141,22 @@ public:
         return It->second.scope.FunctionStore;
     }
     llvm::ModuleAnalysisManager& getMAM() const { return MAM; }
+    const RecurrenceSummary& getRecurrenceSummary() const { return RecSummary; }
+    void printRecurrenceSummary(llvm::raw_ostream &OS) const;
+
+    VRAFunctionInfo& getVRAFunctionInfo(llvm::Function* F) {
+        if (FNs.count(F)) return FNs[F];
+        
+    }
+
+    VRARecurrenceInfo& getVRARecurrenceInfo(const llvm::Value* root) {
+        for (auto &FEntry : FNs) {
+            auto& VFI = FEntry.second;
+            if (VFI.RRs.count(root)) {
+                return VFI.RRs[root];
+            }
+        }
+    }
 
     void interpret();
 
@@ -163,7 +191,8 @@ protected:
     bool analyzeSolvability(const llvm::Value* cur, VRAFunctionInfo& VFI, VRARecurrenceInfo& VRI, VRALoopInfo& VLI);
     bool isSolvableDependenceTree(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
     bool isSolvableDependenceTreeBackwark(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
-    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, llvm::Function* F, FunctionScope& FS);
+    bool isSolvableDependenceTreeDelta(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
+    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock);
 
     bool isFakeRecurrence(VRARecurrenceInfo& VRI);
     bool isUnknownRecurrence(VRARecurrenceInfo& VRI);
@@ -240,6 +269,9 @@ private:
 
     llvm::DenseMap<const llvm::Value*, unsigned> InstrPos;
     u_int16_t remainingUnsolvedRR = 0;
+    RecurrenceSummary RecSummary;
+
+    void computeRecurrenceSummary();
 };
 
 }

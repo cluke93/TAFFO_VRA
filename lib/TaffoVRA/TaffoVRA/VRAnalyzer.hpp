@@ -51,13 +51,24 @@ public:
 
   std::shared_ptr<Range>getRange(const std::shared_ptr<ValueInfo> Range);
   std::shared_ptr<Range>getBBRange(const llvm::Value *V);
+  std::shared_ptr<Range> getRRJoinedRange(RangedRecurrence* RR, u_int64_t TC);
 
   void fallbackCMP(const llvm::Instruction* I);
 
+  //affine standard
   std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) override;
   std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
+  
   std::shared_ptr<RangedRecurrence> buildFakeStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
-  std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
+
+  // flattened
+  std::shared_ptr<RangedRecurrence> buildPHIAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) override;
+  std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+
+  //delta
+  std::shared_ptr<RangedRecurrence> buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* store, VRARecurrenceInfo* InnerVRI) override;
+  std::shared_ptr<RangedRecurrence> buildDeltaAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) override;
+  
   std::shared_ptr<RangedRecurrence> buildInitRecurrence(std::shared_ptr<Range> LastStoredRange, const llvm::StoreInst *store) override;
   std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) override;
   std::shared_ptr<RangedRecurrence> buildGeometricPHIRecurrence(const llvm::PHINode *phi) override;
