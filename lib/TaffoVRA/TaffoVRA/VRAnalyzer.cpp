@@ -627,7 +627,7 @@ void VRAnalyzer::handleStoreInstr(const Instruction* I, bool& isRangeChanged) {
 
   const std::shared_ptr<Range> oldValueRange = getRange(ValueNode);
   const std::shared_ptr<Range> oldPointedRange = getRange(loadNode(AddressNode));
-  LLVM_DEBUG(tda::log() << " STORE OLD_RANGE = "<< (oldValueRange ? oldValueRange->toString() : "(none)") << " ");
+  LLVM_DEBUG(tda::log() << " STORE OLD_RANGE = "<< (oldPointedRange ? oldPointedRange->toString() : "(none)") << " ");
 
   if (!ValueNode && !ValueParam->getType()->isPointerTy())
     ValueNode = fetchRangeNode(I);
@@ -638,7 +638,11 @@ void VRAnalyzer::handleStoreInstr(const Instruction* I, bool& isRangeChanged) {
     std::shared_ptr<Range> currentRange = getRange(ValueNode);
     if (!currentRange)
       currentRange = fetchRange(ValueParam);
-
+      
+    if (oldPointedRange && currentRange) {
+      currentRange = currentRange->join(oldPointedRange);
+    }
+    
     if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
       auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
       Cloned->range = currentRange;
@@ -1097,6 +1101,16 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildPHIAffineFlattingRecur
   return std::make_shared<AffineFlattenedRangedRecurrence>(std::move(StartRange), std::move(StepRange));
 }
 
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildPHIGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* PHI) {
+
+  auto StartRange = getRange(getNode(PHI->getIncomingValue(0)));
+  auto RatioRange = getRange(getNode(VRI.loadHigherDim));
+
+  RatioRange = handleDiv(RatioRange, StartRange);
+
+  return std::make_shared<GeometricFlattenedRangedRecurrence>(std::move(StartRange), std::move(RatioRange));
+}
+
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
 
   auto StartRange = getRange(getNode(VRI.loadJunction));
@@ -1105,6 +1119,16 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineFlattingRecurren
   StepRange = handleSub(StepRange, StartRange);
 
   return std::make_shared<AffineFlattenedRangedRecurrence>(std::move(StartRange), std::move(StepRange));
+}
+
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
+
+  auto StartRange = getRange(getNode(VRI.loadJunction));
+  auto RatioRange = getRange(getNode(VRI.loadHigherDim));
+
+  RatioRange = handleDiv(RatioRange, StartRange);
+
+  return std::make_shared<GeometricFlattenedRangedRecurrence>(std::move(StartRange), std::move(RatioRange));
 }
 
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) {
@@ -1168,6 +1192,109 @@ std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildDeltaAffineStoreRecurr
   return nullptr;
 }
 
+std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildDeltaGeometricPHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) {
+
+  auto InnerGeom = llvm::dyn_cast<GeometricRangedRecurrence>(InnerVRI->RR);
+  if (!InnerGeom) {
+    if (auto InnerFlat = llvm::dyn_cast<GeometricFlattenedRangedRecurrence>(InnerVRI->RR)) {
+      InnerGeom = std::make_shared<GeometricRangedRecurrence>(InnerFlat->getStart(), InnerFlat->getRatio());
+    } else if (auto InnerCross = llvm::dyn_cast<GeometricCrossingRangedRecurrence>(InnerVRI->RR)) {
+      InnerGeom = std::make_shared<GeometricRangedRecurrence>(InnerCross->getStart(), InnerCross->getRatio());
+    }
+  }
+
+  const Value* op = phi->getIncomingValue(0);
+  std::shared_ptr<ValueInfo> op_node = getNode(op);
+  std::shared_ptr<Range> StartRange = getRange(op_node);
+
+  const Value* op_1 = phi->getIncomingValue(1);
+  std::shared_ptr<ValueInfo> op_node_1 = getNode(op_1);
+  std::shared_ptr<Range> OuterIncomingRange = getRange(op_node_1);
+  
+  std::shared_ptr<Range> InnerComputedRange = nullptr;
+  if (InnerGeom && InnerVRI->lastRangeComputedAt > 0) {
+    InnerComputedRange = InnerGeom->at(InnerVRI->lastRangeComputedAt);
+  }
+  if (!InnerComputedRange)
+    InnerComputedRange = InnerVRI->lastRange;
+
+  std::shared_ptr<Range> StepRange = nullptr;
+
+  // Prefer an exact constant multiplier if the delta chain is a single FMul/Mul by a constant.
+  if (VRI.chain.size() == 1 && !StepRange) {
+    if (const auto *BO = dyn_cast<BinaryOperator>(VRI.chain.front())) {
+      if (BO->getOpcode() == Instruction::FMul || BO->getOpcode() == Instruction::Mul) {
+        const Value *Op0 = BO->getOperand(0);
+        const Value *Op1 = BO->getOperand(1);
+        const Value *ConstOp = nullptr;
+        if (isa<ConstantFP>(Op0) || isa<ConstantInt>(Op0))
+          ConstOp = Op0;
+        else if (isa<ConstantFP>(Op1) || isa<ConstantInt>(Op1))
+          ConstOp = Op1;
+
+        if (ConstOp) {
+          if (const auto *CFP = dyn_cast<ConstantFP>(ConstOp)) {
+            StepRange = Range::Point(CFP->getValueAPF()).clone();
+          } else if (const auto *CI = dyn_cast<ConstantInt>(ConstOp)) {
+            StepRange = Range::Point(llvm::APFloat((double)CI->getSExtValue())).clone();
+          } else {
+            auto ConstRange = getRange(getNode(ConstOp));
+            if (ConstRange)
+              StepRange = ConstRange;
+          }
+        }
+      }
+    }
+  }
+
+  // If the backedge value is exactly the inner recurrence root, the outer loop
+  // does not apply any extra operation: force ratio_out = 1.
+  if (!StepRange) {
+    // Directly extract a constant multiplier from the backedge instruction.
+    if (const auto *BO = dyn_cast<BinaryOperator>(op_1)) {
+      if (BO->getOpcode() == Instruction::FMul || BO->getOpcode() == Instruction::Mul) {
+        const Value *Op0 = BO->getOperand(0);
+        const Value *Op1 = BO->getOperand(1);
+        const Value *ConstOp = nullptr;
+        if (isa<ConstantFP>(Op0) || isa<ConstantInt>(Op0))
+          ConstOp = Op0;
+        else if (isa<ConstantFP>(Op1) || isa<ConstantInt>(Op1))
+          ConstOp = Op1;
+        if (ConstOp) {
+          if (const auto *CFP = dyn_cast<ConstantFP>(ConstOp)) {
+            StepRange = Range::Point(CFP->getValueAPF()).clone();
+          } else if (const auto *CI = dyn_cast<ConstantInt>(ConstOp)) {
+            StepRange = Range::Point(llvm::APFloat((double)CI->getSExtValue())).clone();
+          }
+        }
+      }
+    }
+  }
+
+  if (!StepRange) {
+    if (VRI.innerRR && op_1 == VRI.innerRR) {
+      StepRange = Range::Point(llvm::APFloat(1.0)).clone();
+    } else if (VRI.chain.empty()) {
+      // No extra ops recorded on the outer latch: ratio_out = 1
+      StepRange = Range::Point(llvm::APFloat(1.0)).clone();
+    } else if (OuterIncomingRange && InnerComputedRange) {
+      // Estimate ratio_out as outer_value / (prev_outer * inner_block).
+      if (StartRange) {
+        if (auto Den = handleMul(StartRange, InnerComputedRange))
+          StepRange = handleDiv(OuterIncomingRange, Den);
+      }
+      if (!StepRange)
+        StepRange = handleDiv(OuterIncomingRange, InnerComputedRange);
+    }
+  }
+
+  return std::make_shared<GeometricDeltaRangedRecurrence>(std::move(StartRange), std::move(StepRange), std::move(InnerGeom), InnerVRI->lastRangeComputedAt);
+}
+
+std::shared_ptr<RangedRecurrence> VRAnalyzer::buildDeltaGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) {
+  return nullptr;
+}
+
 // valid when delta index is 1
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* Store) {
 
@@ -1226,6 +1353,38 @@ std::pair<std::shared_ptr<RangedRecurrence>, std::shared_ptr<RangedRecurrence>> 
   return {
     std::make_shared<AffineCrossingRangedRecurrence>(std::move(FirstStartRange), StepRange),
     std::make_shared<AffineCrossingRangedRecurrence>(std::move(SecondStartRange), std::move(StepRange))};
+}
+
+std::pair<std::shared_ptr<RangedRecurrence>, std::shared_ptr<RangedRecurrence>> VRAnalyzer::buildStoreCrossingGeometricRecurrence(VRAAssignationInfo first, VRAAssignationInfo second) {
+  auto FirstStore = dyn_cast<StoreInst>(first.root);
+  auto SecondStore = dyn_cast<StoreInst>(second.root);
+
+  auto FirstStartRange = getRange(getNode(FirstStore->getValueOperand()));
+  auto SecondStartRange = getRange(getNode(SecondStore->getValueOperand()));
+
+  if (!FirstStartRange) FirstStartRange = Range::Top().clone();
+  if (!SecondStartRange) SecondStartRange = Range::Top().clone();
+
+  std::shared_ptr<Range> SecondLoadRange = nullptr;
+  if (auto *SecondValLoad = dyn_cast<LoadInst>(SecondStore->getValueOperand())) {
+    SecondLoadRange = getRange(getNode(SecondValLoad));
+  } else if (auto *SecondValInst = dyn_cast<Instruction>(SecondStore->getValueOperand())) {
+    for (const auto &Op : SecondValInst->operands()) {
+      if (auto *OpLoad = dyn_cast<LoadInst>(Op)) {
+        SecondLoadRange = getRange(getNode(OpLoad));
+        break;
+      }
+    }
+  }
+
+  if (!SecondLoadRange) SecondLoadRange = Range::Top().clone();
+
+  auto RatioRange = handleDiv(FirstStartRange, SecondLoadRange);
+  if (!RatioRange) RatioRange = Range::Top().clone();
+
+  return {
+    std::make_shared<GeometricCrossingRangedRecurrence>(std::move(FirstStartRange), RatioRange),
+    std::make_shared<GeometricCrossingRangedRecurrence>(std::move(SecondStartRange), std::move(RatioRange))};
 }
 
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildInitRecurrence(std::shared_ptr<Range> LastStoredRange, const llvm::StoreInst* Store) {

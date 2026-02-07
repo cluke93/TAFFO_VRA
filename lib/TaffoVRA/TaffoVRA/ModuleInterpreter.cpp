@@ -1125,7 +1125,7 @@ void ModuleInterpreter::assemble() {
                 continue;
             } else if (isAffineRecurrence(VRI)) {
                 continue;
-            } else if(isInitRecurrence(VRI)) {
+            } else if (isDeltaGeometricRecurrence(VRI)) {
                 continue;
             } else if (isGeometricRecurrence(VRI)) {
                 continue;
@@ -1141,6 +1141,16 @@ void ModuleInterpreter::assemble() {
             LLVM_DEBUG(tda::log() << "\n\n[VRA] >> [ASSEMBLE] >> FN["<<F->getName()<<"] - Recognization of " << printInstrName(root) << " instr: " << root << "\n");
 
             if (isCrossingAffineRecurrence(VAI)) {
+                if (VAI.RR) {
+                    auto Next = std::next(ASEntry);
+                    VFI.ASs.erase(ASEntry);
+                    ASEntry = Next;
+                    continue;
+                } else {
+                    ++ASEntry;
+                    continue;
+                }
+            } else if (isCrossingGeometricRecurrence(VAI)) {
                 if (VAI.RR) {
                     auto Next = std::next(ASEntry);
                     VFI.ASs.erase(ASEntry);
@@ -1415,6 +1425,22 @@ static bool isAffineBinaryOp(const Value* V) {
     return opc == llvm::Instruction::Add || opc == llvm::Instruction::Sub || opc == llvm::Instruction::FAdd || opc == llvm::Instruction::FSub;
 }
 
+static bool isGeometricBinaryOp(const Value* V) {
+    const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(V);
+    if (!BO) return false;
+
+    switch (BO->getOpcode()) {
+        case llvm::Instruction::Mul:
+        case llvm::Instruction::FMul:
+        case llvm::Instruction::UDiv:
+        case llvm::Instruction::SDiv:
+        case llvm::Instruction::FDiv:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static std::optional<double> getConstantAsDouble(const llvm::Value *V) {
     if (const auto *CI = llvm::dyn_cast<llvm::ConstantInt>(V))
         return CI->getValue().roundToDouble();
@@ -1455,7 +1481,7 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
                 if (RR) {
                     VRI.RR = RR;
                     solvedRR.push_back(VRI.root);
-                    LLVM_DEBUG(tda::log() << "recognized flatten_"<<RR->toString()<<" \n\n");
+                    LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
                 }
             }
         }
@@ -1566,6 +1592,59 @@ bool ModuleInterpreter::isDeltaAffineRecurrence(VRARecurrenceInfo& VRI) {
         if (auto *latch = L->getLoopLatch()) {
             auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
             std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildDeltaAffinePHIRecurrence(VRI, PN, &VFI.RRs[VRI.innerRR]);
+            if (RR) {
+                VRI.RR = RR;
+                solvedRR.push_back(VRI.root);
+                LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
+            }
+        }
+
+    }
+
+
+    return true;
+}
+
+bool ModuleInterpreter::isDeltaGeometricRecurrence(VRARecurrenceInfo& VRI) {
+    if (VRI.kind != VRAInspectionKind::REC) return false;
+    LLVM_DEBUG(tda::log() << "\t\ttry to recognize as delta geometric recurrence... \n");
+
+    if (!VRI.innerRR) return false;
+
+    const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
+    llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
+    VRAFunctionInfo &VFI = FNs[F];
+    llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
+    VRALoopInfo &VLI = VFI.loops[L];
+    
+    if (const auto *PN = llvm::dyn_cast<llvm::PHINode>(VRI.root)) {
+        
+        bool isSolvable = VRI.chain.size() > 0;
+        for (const auto* RRNode : VRI.chain) {
+            if (VFI.RRs.count(RRNode)) {
+                isSolvable &= VFI.RRs[RRNode].lastRange ? true : false;
+                if (VFI.RRs[RRNode].lastRange && 
+                    !isa<GeometricRangedRecurrence>(VFI.RRs[RRNode].RR) && 
+                    !isa<GeometricFlattenedRangedRecurrence>(VFI.RRs[RRNode].RR) && 
+                    !isa<GeometricCrossingRangedRecurrence>(VFI.RRs[RRNode].RR)) return false;
+                continue;
+            }
+            
+            if (!isGeometricBinaryOp(RRNode)) return false;
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            
+            isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VRI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VRI);
+        }
+
+        if (!isSolvable) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+
+
+        if (auto *latch = L->getLoopLatch()) {
+            auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+            std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildDeltaGeometricPHIRecurrence(VRI, PN, &VFI.RRs[VRI.innerRR]);
             if (RR) {
                 VRI.RR = RR;
                 solvedRR.push_back(VRI.root);
@@ -1723,6 +1802,150 @@ bool ModuleInterpreter::isCrossingAffineRecurrence(VRAAssignationInfo& VAI) {
     return true;
 }
 
+bool ModuleInterpreter::isCrossingGeometricRecurrence(VRAAssignationInfo& VAI) {
+    if (VAI.kind != VRAInspectionKind::ASSIGN || VAI.chain.size() == 0) return false;
+    LLVM_DEBUG(tda::log() << "\t\ttry to recognize as crossing geometric recurrence... \n");
+
+    const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VAI.root);
+    llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
+    VRAFunctionInfo &VFI = FNs[F];
+    llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
+    VRALoopInfo &VLI = VFI.loops[L];
+    
+    if (const auto *PN = llvm::dyn_cast<llvm::PHINode>(VAI.root)) {
+
+
+
+    } else if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(VAI.root)) {
+        if (VAI.loads.size() == 0) return false;
+
+        bool isSolvable = true;
+        for (const auto* RRNode : VAI.chain) { LLVM_DEBUG(tda::log() << " (ANALYZING " << VAI.root << ") ");
+            if (!isGeometricBinaryOp(RRNode)) { LLVM_DEBUG(tda::log() << " (KO) "); return false; }
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VAI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VAI);
+        }
+
+        // extra check for crossing: check that all loads of the current VAI on base X refers to the same base Y and that base Y has another VAI which has all loads with the same base X
+        const llvm::Value* curLoad = nullptr;
+        const llvm::LoadInst* curLoadInst = nullptr;
+        for (const auto* loadPtr : VAI.loads) {
+            if (!curLoad) { LLVM_DEBUG(tda::log() << "\n(BASE CAND: " << printInstrName(loadPtr) << ")\n"); 
+                curLoad = getBaseMemoryObject(loadPtr->getPointerOperand()); }
+            else if (getBaseMemoryObject(loadPtr->getPointerOperand()) != curLoad) { 
+                LLVM_DEBUG(tda::log() << " (FOUND DIFF BASE " << printInstrName(loadPtr) << "): abort\n"); 
+                return false;
+            }
+            curLoadInst = loadPtr;
+        }
+
+        // check delta store/load = 1
+        const Value *StoreIdx = getIndexOperand(Store->getPointerOperand());
+        const Value *LoadIdx = getIndexOperand(dyn_cast<LoadInst>(curLoadInst)->getPointerOperand());
+
+        int64_t StoreOff = 0;
+        int64_t LoadOff = 0;
+
+        const Value *StoreIV = matchIVOffset(VFI, StoreIdx, StoreOff, L);
+        const Value *LoadIV = matchIVOffset(VFI, LoadIdx, LoadOff, L);
+        if (!StoreIV || !LoadIV || StoreIV != LoadIV) return false;
+        
+        const int64_t delta = StoreOff - LoadOff;
+        if (std::abs(delta) != 1) {
+            LLVM_DEBUG(tda::log() << " delta idx not 1: abort\n");
+            return false;
+        }
+
+
+        const llvm::Value* complementaryStore = nullptr;
+        for (auto [root, AS] : VFI.ASs) { LLVM_DEBUG(tda::log() << " (CHECKING " << root << ") \n");
+            if (isa<PHINode>(root) || root == VAI.root) continue;
+
+            const llvm::Value* otherLoad = nullptr;
+            const llvm::LoadInst* otherLoadInst = nullptr;
+            for (const auto* loadPtr : AS.loads) {
+                if (!otherLoad) {
+                    otherLoad = getBaseMemoryObject(loadPtr->getPointerOperand());
+                    LLVM_DEBUG(tda::log() << " (AS LOAD: " << printInstrName(loadPtr) << ")\n"); 
+                } else if (getBaseMemoryObject(loadPtr->getPointerOperand()) != otherLoad) {
+                    LLVM_DEBUG(tda::log() << " (FOUND DIFF BASE (2) " << printInstrName(loadPtr) << "): abort\n"); 
+                    return false;
+                }
+                otherLoadInst = loadPtr;
+            }
+
+            if (!otherLoad || otherLoad != getBaseMemoryObject(Store->getPointerOperand())) continue;
+            LLVM_DEBUG(tda::log() << " (FOUND POT: " << printInstrName(root) << ")\n");
+
+            const auto* ComplementaryInstr = llvm::dyn_cast<llvm::Instruction>(root);
+            if (VFI.LI->getLoopFor(ComplementaryInstr->getParent()) != L) continue;
+            LLVM_DEBUG(tda::log() << " SAME LOOP!! \n");
+
+            // check delta store/load = 1
+            const Value *StoreIdx = getIndexOperand(dyn_cast<StoreInst>(root)->getPointerOperand());
+            const Value *LoadIdx = getIndexOperand(dyn_cast<LoadInst>(otherLoadInst)->getPointerOperand());
+
+            int64_t StoreOff = 0;
+            int64_t LoadOff = 0;
+
+            const Value *StoreIV = matchIVOffset(VFI, StoreIdx, StoreOff, L);
+            const Value *LoadIV = matchIVOffset(VFI, LoadIdx, LoadOff, L);
+            if (!StoreIV || !LoadIV || StoreIV != LoadIV) return false;
+            
+            const int64_t delta = StoreOff - LoadOff;
+            if (std::abs(delta) != 1) {
+                LLVM_DEBUG(tda::log() << " delta idx (2) not 1: abort\n");
+                return false;
+            }
+
+            complementaryStore = root;
+        }
+
+        if (!complementaryStore) return false;
+
+        //check dependency also for complementary
+        for (const auto* RRNode : VFI.ASs[complementaryStore].chain) { LLVM_DEBUG(tda::log() << " (ANALYZING2 " << VAI.root << ") ");
+            if (!isGeometricBinaryOp(RRNode)) { LLVM_DEBUG(tda::log() << " (KO2) "); return false; }
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VAI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VAI);
+        }
+        
+        if (!isSolvable) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+
+        if (auto *latch = L->getLoopLatch()) {
+            auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+            auto RRCoupled = LatchAnalyzer->buildStoreCrossingGeometricRecurrence(
+                isBefore(VAI.root, complementaryStore) ? VFI.ASs[complementaryStore] : VAI,
+                isBefore(VAI.root, complementaryStore) ? VAI : VFI.ASs[complementaryStore]);
+            if (RRCoupled.first && RRCoupled.second) {
+                VAI.RR = RRCoupled.first;   // to mark as resolved
+
+                VRARecurrenceInfo VRA1(VAI.root);
+                VRA1.kind = VRAInspectionKind::REC;
+                VRA1.RR = RRCoupled.first;
+
+                VRARecurrenceInfo VRA2(complementaryStore);
+                VRA2.kind = VRAInspectionKind::REC;
+                VRA2.RR = RRCoupled.second;
+
+                remainingUnsolvedRR += 2;
+                VFI.addRecurrenceInfo(VRA1);
+                VFI.addRecurrenceInfo(VRA2);
+
+                solvedRR.push_back(VRA1.root);
+                solvedRR.push_back(VRA2.root);
+
+                LLVM_DEBUG(tda::log() << "recognized "<<VRA1.RR->toString()<<" \n");
+                LLVM_DEBUG(tda::log() << "recognized "<<VRA2.RR->toString()<<" \n\n");
+            }
+        }
+    }
+    return true;
+}
+
 std::shared_ptr<Range> ModuleInterpreter::getLastStoredRange(const llvm::Value* BaseStore) {
     std::shared_ptr<Range> joinedR = nullptr;
     for (auto [_, FN] : FNs) {
@@ -1793,20 +2016,103 @@ bool ModuleInterpreter::isInitRecurrence(VRARecurrenceInfo& VRI) {
     return true;
 }
 
-static bool isGeometricBinaryOp(const Value* V) {
-    const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(V);
-    if (!BO) return false;
-
-    //todo: handle divisions, but be careful when operand has range crossing zero or is whole negative
-    const unsigned opc = BO->getOpcode();
-    return opc == llvm::Instruction::Mul || opc == llvm::Instruction::FMul;
-}
 
 bool ModuleInterpreter::isGeometricRecurrence(VRARecurrenceInfo& VRI) {
     if (VRI.kind != VRAInspectionKind::REC) return false;
     LLVM_DEBUG(tda::log() << "\t\ttry to recognize as geometric recurrence... \n");
 
-    
+    const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
+    llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
+    VRAFunctionInfo &VFI = FNs[F];
+    llvm::Loop *L = VFI.LI->getLoopFor(InstrRoot->getParent());
+    VRALoopInfo &VLI = VFI.loops[L];
+
+    if (const auto *PN = llvm::dyn_cast<llvm::PHINode>(VRI.root)) {
+
+        bool isSolvable = VRI.chain.size() > 0;
+        for (const auto* RRNode : VRI.chain) {
+            if (!isGeometricBinaryOp(RRNode)) return false;
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VRI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VRI);
+        }
+
+        if (!isSolvable) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+
+        if (VRI.loadHigherDim) {
+            if (auto *latch = L->getLoopLatch()) {
+                auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+                std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildPHIGeometricFlattingRecurrence(VRI, PN);
+                if (RR) {
+                    VRI.RR = RR;
+                    solvedRR.push_back(VRI.root);
+                    LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
+                }
+            }
+        }
+        else if (auto *latch = L->getLoopLatch()) {
+            auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+            std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildGeometricPHIRecurrence(PN);
+            if (RR) {
+                VRI.RR = RR;
+                solvedRR.push_back(VRI.root);
+                LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
+            }
+        }
+
+    } else if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(VRI.root)) {
+        
+        bool isSolvable = VRI.chain.size() > 0;
+        for (const auto* RRNode : VRI.chain) {
+            if (!isGeometricBinaryOp(RRNode)) return false;
+            const auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(RRNode);
+            isSolvable &= isSolvableDependenceTreeBackwark(BO->getOperand(0), L, VRI) && isSolvableDependenceTreeBackwark(BO->getOperand(1), L, VRI);
+        }
+        
+        if (!isSolvable) {
+            LLVM_DEBUG(tda::log() << "\t\t\tRR is not solvable yet: it depends on other unsolved recurrences\n");
+            return true;
+        }
+        
+        if (VRI.loadHigherDim) {
+            if (auto *latch = L->getLoopLatch()) {
+                auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+                std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildGeometricFlattingRecurrence(VRI, Store);
+                if (RR) {
+                    VRI.RR = RR;
+                    solvedRR.push_back(VRI.root);
+                    LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
+                }
+            }
+        }
+        else if (getBaseMemoryObject(Store->getPointerOperand()) == getBaseMemoryObject(VRI.loadJunction->getPointerOperand())) {
+            const Value *StoreIdx = getIndexOperand(Store->getPointerOperand());
+            const Value *LoadIdx = getIndexOperand(VRI.loadJunction->getPointerOperand());
+
+            int64_t StoreOff = 0;
+            int64_t LoadOff = 0;
+
+            const Value *StoreIV = matchIVOffset(VFI, StoreIdx, StoreOff, L);
+            const Value *LoadIV = matchIVOffset(VFI, LoadIdx, LoadOff, L);
+            if (!StoreIV || !LoadIV || StoreIV != LoadIV) return false;
+            
+            const int64_t delta = StoreOff - LoadOff;
+            if (std::abs(delta) != 1) return false;
+
+            if (auto *latch = L->getLoopLatch()) {
+                auto LatchAnalyzer = VFI.scope.BBAnalyzers[L->getLoopLatch()];
+                std::shared_ptr<RangedRecurrence> RR = LatchAnalyzer->buildGeometricStoreRecurrence(VRI, Store);
+                if (RR) {
+                    VRI.RR = RR;
+                    solvedRR.push_back(VRI.root);
+                    LLVM_DEBUG(tda::log() << "recognized "<<RR->toString()<<" \n\n");
+                }
+            }
+        }
+        
+    }
     return true;
 }
 
