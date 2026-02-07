@@ -186,7 +186,7 @@ public:
   const std::shared_ptr<Range>& getStart() const noexcept { return Start; }
   const std::shared_ptr<Range>& getStep()  const noexcept { return Step;  }
   const std::shared_ptr<AffineRangedRecurrence>& getInnerRR()  const noexcept { return InnerAffine; }
-  const u_int64_t getInnerTC()  const noexcept { return InnerTC;  }
+  u_int64_t getInnerTC()  const noexcept { return InnerTC;  }
 
 private:
   std::shared_ptr<Range> Start;

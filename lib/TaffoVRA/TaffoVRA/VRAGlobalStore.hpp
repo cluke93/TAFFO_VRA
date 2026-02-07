@@ -18,9 +18,7 @@ public:
   VRAGlobalStore()
   : VRAStore(VRASK_VRAGlobalStore, std::make_shared<VRALogger>()), AnalysisStore(ASK_VRAGlobalStore) {}
 
-  std::shared_ptr<VRAGlobalStore> deepClone() const;
-
-  void convexMerge(const AnalysisStore& other, bool isFallback = false) override;
+  void convexMerge(const AnalysisStore& other) override;
   std::shared_ptr<CodeAnalyzer> newCodeAnalyzer(CodeInterpreter& CI) override;
   std::shared_ptr<AnalysisStore> newFunctionStore(CodeInterpreter& CI) override;
 

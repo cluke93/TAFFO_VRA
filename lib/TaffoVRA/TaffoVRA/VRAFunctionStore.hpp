@@ -14,7 +14,7 @@ public:
   VRAFunctionStore(std::shared_ptr<VRALogger> VRAL)
   : VRAStore(VRASK_VRAFunctionStore, VRAL), AnalysisStore(ASK_VRAFunctionStore) {}
 
-  void convexMerge(const AnalysisStore& Other, bool isFallback = false) override;
+  void convexMerge(const AnalysisStore& Other) override;
   std::shared_ptr<CodeAnalyzer> newCodeAnalyzer(CodeInterpreter& CI) override;
   std::shared_ptr<AnalysisStore> newFunctionStore(CodeInterpreter& CI) override;
 
@@ -27,8 +27,6 @@ public:
   void setNode(const llvm::Value* V, std::shared_ptr<ValueInfo> Node) override { VRAStore::setNode(V, Node); }
 
   std::shared_ptr<ValueInfo> getNode(const llvm::Value* V) override { return VRAStore::getNode(V); }
-
-  std::shared_ptr<VRAFunctionStore> deepClone() const;
 
   // Function handling stuff
   std::shared_ptr<ValueInfo> getRetVal() const { return ReturnValue; }

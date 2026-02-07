@@ -42,14 +42,13 @@ void CodeInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Analy
     auto CAIt = Scopes.back().BBAnalyzers.find(BB);
     assert(CAIt != Scopes.back().BBAnalyzers.end());
     std::shared_ptr<CodeAnalyzer> CurAnalyzer = CAIt->second;
-    bool isRangeChanged = false;
 
     DEBUG_WITH_TYPE(GlobalStore->getLogger()->getDebugType(), GlobalStore->getLogger()->logBasicBlock(BB));
     for (llvm::Instruction& I : *BB)
       if (CurAnalyzer->requiresInterpretation(&I))
         interpretCall(CurAnalyzer, &I);
       else
-        CurAnalyzer->analyzeInstruction(&I, isRangeChanged);
+        CurAnalyzer->analyzeInstruction(&I);
 
     assert(Scopes.back().EvalCount[BB] > 0 && "Trying to evaluate block with 0 EvalCount.");
     --(Scopes.back().EvalCount[BB]);
@@ -194,11 +193,9 @@ void CodeInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, l
 
   std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFunctionStore(*this);
 
-  VRAFunctionInfo VFI(F, getMAM());
-  bool useless = false; //for new vra
-  CurAnalyzer->prepareForCall(I, FunctionStore, VFI, useless);
+  CurAnalyzer->prepareForCall(I, FunctionStore);
   interpretFunction(F, FunctionStore);
-  CurAnalyzer->returnFromCall(I, FunctionStore, VFI, useless);
+  CurAnalyzer->returnFromCall(I, FunctionStore);
 
   updateLoopInfo(I->getFunction());
 }

@@ -12,12 +12,12 @@ using namespace llvm;
 using namespace tda;
 using namespace taffo;
 
-void VRAStore::convexMerge(const VRAStore& other, bool isFallback) {
+void VRAStore::convexMerge(const VRAStore& other) {
   for (const auto& [value, otherValueInfo] : other.DerivedRanges) {
     if (std::shared_ptr<ValueInfo> valueInfo = this->getNode(value)) {
       if (std::isa_ptr<StructInfo>(valueInfo))
         assignStructNode(valueInfo, otherValueInfo);
-      else if (std::shared_ptr<ScalarInfo> unionInfo = assignScalarRange(valueInfo, otherValueInfo, isFallback))
+      else if (std::shared_ptr<ScalarInfo> unionInfo = assignScalarRange(valueInfo, otherValueInfo))
         DerivedRanges[value] = unionInfo;
     }
     else {
@@ -109,7 +109,7 @@ std::shared_ptr<ValueInfo> VRAStore::loadNode(const std::shared_ptr<ValueInfo>& 
   }
 }
 
-std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<ValueInfo>& dst, const std::shared_ptr<ValueInfo>& src, bool isFallback) const {
+std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<ValueInfo>& dst, const std::shared_ptr<ValueInfo>& src) const {
   std::shared_ptr<ScalarInfo> scalarDst = std::dynamic_ptr_cast_or_null<ScalarInfo>(dst);
   const std::shared_ptr<ScalarInfo> scalarSrc = std::dynamic_ptr_cast_or_null<ScalarInfo>(src);
   if (!scalarDst || !scalarSrc)
@@ -117,8 +117,8 @@ std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<Va
   if (scalarDst->isFinal())
     return scalarDst;
 
-  if (UseOldVRA || isFallback) {
-    std::shared_ptr<Range> unionRange = getUnionRange(scalarDst->range, scalarSrc->range);
+  if (UseOldVRA) {
+    std::shared_ptr<Range> unionRange = scalarDst->range->join(scalarSrc->range);
     return std::make_shared<ScalarInfo>(nullptr, unionRange);
   } else {
 

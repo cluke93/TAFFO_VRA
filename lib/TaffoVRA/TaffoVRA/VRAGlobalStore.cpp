@@ -14,14 +14,14 @@ using namespace taffo;
 
 #define DEBUG_TYPE "taffo-vra"
 
-void VRAGlobalStore::convexMerge(const AnalysisStore& other, bool isFallback) {
+void VRAGlobalStore::convexMerge(const AnalysisStore& other) {
   // Since dyn_cast<T>() does not do cross-casting, we must do this:
   if (isa<VRAnalyzer>(other))
-    VRAStore::convexMerge(cast<VRAStore>(cast<VRAnalyzer>(other)), isFallback);
+    VRAStore::convexMerge(cast<VRAStore>(cast<VRAnalyzer>(other)));
   else if (isa<VRAGlobalStore>(other))
-    VRAStore::convexMerge(cast<VRAStore>(cast<VRAGlobalStore>(other)), isFallback);
+    VRAStore::convexMerge(cast<VRAStore>(cast<VRAGlobalStore>(other)));
   else
-    VRAStore::convexMerge(cast<VRAStore>(cast<VRAFunctionStore>(other)), isFallback);
+    VRAStore::convexMerge(cast<VRAStore>(cast<VRAFunctionStore>(other)));
 }
 
 std::shared_ptr<CodeAnalyzer> VRAGlobalStore::newCodeAnalyzer(CodeInterpreter& CI) {
@@ -38,34 +38,6 @@ std::shared_ptr<CodeAnalyzer> VRAGlobalStore::newInstructionAnalyzer(ModuleInter
 
 std::shared_ptr<AnalysisStore> VRAGlobalStore::newFnStore(ModuleInterpreter& MI) {
   return std::make_shared<VRAFunctionStore>(std::static_ptr_cast<VRALogger>(MI.getGlobalStore()->getLogger()));
-}
-
-std::shared_ptr<VRAGlobalStore> VRAGlobalStore::deepClone() const {
-  auto clone = std::make_shared<VRAGlobalStore>();
-  clone->Logger = Logger;
-
-  llvm::DenseMap<const ValueInfo*, std::shared_ptr<ValueInfo>> cache;
-  cache.reserve(DerivedRanges.size() + UserInput.size());
-
-  const auto cloneValue = [&](const std::shared_ptr<ValueInfo>& src) -> std::shared_ptr<ValueInfo> {
-    if (!src)
-      return nullptr;
-    if (const auto it = cache.find(src.get()); it != cache.end())
-      return it->second;
-    auto copy = src->clone<ValueInfo>();
-    cache[src.get()] = copy;
-    return copy;
-  };
-
-  clone->DerivedRanges.reserve(DerivedRanges.size());
-  for (const auto& [value, info] : DerivedRanges)
-    clone->DerivedRanges[value] = cloneValue(info);
-
-  clone->UserInput.reserve(UserInput.size());
-  for (const auto& [value, info] : UserInput)
-    clone->UserInput[value] = std::dynamic_ptr_cast<ValueInfoWithRange>(cloneValue(info));
-
-  return clone;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

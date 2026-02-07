@@ -165,19 +165,15 @@ public:
     const RecurrenceSummary& getRecurrenceSummary() const { return RecSummary; }
     void printRecurrenceSummary(llvm::raw_ostream &OS) const;
 
-    VRAFunctionInfo& getVRAFunctionInfo(llvm::Function* F) {
-        if (FNs.count(F)) return FNs[F];
-        
+    VRARecurrenceInfo* getVRARecurrenceInfo(const llvm::Value* root) {
+        for (auto &FEntry : FNs) {
+            auto &VFI = FEntry.second;
+            if (auto It = VFI.RRs.find(root); It != VFI.RRs.end())
+                return &It->second;
+        }
+        return nullptr;
     }
 
-    VRARecurrenceInfo& getVRARecurrenceInfo(const llvm::Value* root) {
-        for (auto &FEntry : FNs) {
-            auto& VFI = FEntry.second;
-            if (VFI.RRs.count(root)) {
-                return VFI.RRs[root];
-            }
-        }
-    }
 
     std::shared_ptr<Range> getLastStoredRange(const llvm::Value* BaseStore);
 
@@ -194,7 +190,7 @@ protected:
     void preSeed();
     void interpretFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore = nullptr);
     FollowingPathResponse followPath(VRAFunctionInfo info, llvm::BasicBlock* src, llvm::BasicBlock* dst, llvm::SmallVector<llvm::Loop*> nesting) const;
-    void interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged);
+    void interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I);
     
     void updateSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx);
 
@@ -206,7 +202,7 @@ protected:
 
     // LATTEX - RESOLUTION METHODS
     void resolveFunction(llvm::Function* F, std::shared_ptr<AnalysisStore> FunctionStore = nullptr);
-    void resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I, bool& isRangeChanged);
+    void resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I);
     
     // 3) ASSEMBLING METHODS
     void assemble();
@@ -216,8 +212,6 @@ protected:
     void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock);
 
     bool isFakeRecurrence(VRARecurrenceInfo& VRI);
-    bool isUnknownRecurrence(VRARecurrenceInfo& VRI);
-    bool isInitRecurrence(VRARecurrenceInfo& VRI);
 
     bool isAffineRecurrence(VRARecurrenceInfo& VRI);
     bool isDeltaAffineRecurrence(VRARecurrenceInfo& VRI);
@@ -289,7 +283,6 @@ private:
 
     llvm::SmallVector<const llvm::Value*> solvedRR;
     u_int16_t solvedTC;
-    u_int64_t propagationChanging;
 
     llvm::DenseMap<const llvm::Value*, unsigned> InstrPos;
     u_int16_t remainingUnsolvedRR = 0;

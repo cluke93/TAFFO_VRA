@@ -520,7 +520,7 @@ std::shared_ptr<ValueInfoWithRange> taffo::getUnionRange(const std::shared_ptr<V
 
   if (const std::shared_ptr<ScalarInfo> sop1 = std::dynamic_ptr_cast<ScalarInfo>(op1)) {
     const std::shared_ptr<ScalarInfo> sop2 = std::static_ptr_cast<ScalarInfo>(op2);
-    return std::make_shared<ScalarInfo>(nullptr, getUnionRange(sop1->range, sop2->range));
+    return std::make_shared<ScalarInfo>(nullptr, sop1->range->join(sop2->range));
   }
 
   const std::shared_ptr<StructInfo> op1_s = std::static_ptr_cast<StructInfo>(op1);
