@@ -288,6 +288,9 @@ private:
     u_int16_t remainingUnsolvedRR = 0;
     RecurrenceSummary RecSummary;
 
+    llvm::SmallVector<std::pair<const llvm::Function*, const llvm::Value*>> phiFalledBack;
+    bool isFallback = false;
+
     void computeRecurrenceSummary();
 };
 

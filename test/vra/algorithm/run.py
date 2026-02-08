@@ -13,7 +13,7 @@ if __name__ == "__main__":
         sys.executable,
         str(runner_path),
         "-tests-dir", str(test_dir),
-        "-common-args", "-O3 -DM=1 -fno-vectorize -fno-slp-vectorize",
+        "-common-args", "-O3 -DM=20 -fno-vectorize -fno-slp-vectorize",
         *sys.argv[1:]
     ]
     result = subprocess.run(cmd, cwd=str(script_dir))

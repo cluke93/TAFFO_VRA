@@ -1,7 +1,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define M 1000
+#ifndef M
+#define M 1
+#endif
+
 #define R 100
 
 static inline float __attribute__((annotate("scalar(range(0, 1) disabled)"))) fast_rand01(void) {

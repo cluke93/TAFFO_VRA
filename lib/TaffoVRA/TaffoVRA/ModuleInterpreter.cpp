@@ -471,6 +471,7 @@ void ModuleInterpreter::printRecurrenceSummary(llvm::raw_ostream &OS) const {
 
 void ModuleInterpreter::resolve() {
     size_t iteration = 1;
+    isFallback = false;
 
     do {
 
@@ -496,19 +497,31 @@ void ModuleInterpreter::resolve() {
         LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
 
         ++iteration;
-        // if (MaxPropagation && iteration > MaxPropagation || solvedRR.size() == 0 && remainingUnsolvedRR > 0) {
-        //     LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << MaxPropagation << " iteration(s) no fixed point reached: widening falling back remaining RR and last iteration\n");
-        //     fallback();
-        //     propagate();
-        //     fallbackCMP();
-
-        //     LLVM_DEBUG(tda::log() << "\n\n------------------------------------------------------------------------------\n");
-        //     LLVM_DEBUG(tda::log() << "propagation fallback completed: changing on " << propagationChanging << " instructions.\n");
-        //     LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
-
-        //     break;
-        // }
+        if (MaxPropagation && iteration > MaxPropagation || solvedRR.size() == 0 && remainingUnsolvedRR > 0) {
+            LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << MaxPropagation << " iteration(s) no fixed point reached: widening falling back remaining RR and last iteration\n");
+            fallback();
+            isFallback = true;
+        }
     } while (solvedRR.size() != 0);
+
+    if (isFallback) {
+        propagate();
+        // for (auto &[F, V] : phiFalledBack) {
+        //     auto FnIt = FNs.find(const_cast<llvm::Function*>(F));
+        //     if (FnIt == FNs.end())
+        //         continue;
+
+        //     llvm::Instruction *Phi = llvm::cast<llvm::Instruction>(const_cast<llvm::Value*>(V));
+        //     auto &Analyzers = FnIt->second.scope.BBAnalyzers;
+        //     auto BBAIt = Analyzers.find(Phi->getParent());
+        //     if (BBAIt != Analyzers.end())
+        //         BBAIt->second->analyzeInstruction(Phi);
+        // }
+
+        LLVM_DEBUG(tda::log() << "\n\n------------------------------------------------------------------------------\n");
+        LLVM_DEBUG(tda::log() << "Fallback completed: final join of "<<phiFalledBack.size()<<" falled back recurrence over phi nodes\n");
+        LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
+    }
 
     // do final convex merge from the fix-pointed last scopes
     for (auto [F,VFI] : FNs) {
@@ -640,10 +653,40 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
                     llvm::Loop* dstLoop = curLoop.back();
                     curLoop.pop_back();
 
+                    //insert once, avoid exit block duplicated
                     SmallVector<BasicBlock*, 4> exits;
                     dstLoop->getExitBlocks(exits);
+
+                    llvm::SmallPtrSet<BasicBlock*, 8> queuedBlocks;
+                    for (llvm::BasicBlock* QB : worklist)
+                        queuedBlocks.insert(QB);
+
+                    // allow enqueue only if every predecessor has already been visited in the current flow
+                    const llvm::SmallVector<llvm::BasicBlock*>& curFlow = curLoop.empty()
+                        ? VFI.bbFlow
+                        : VFI.loops.lookup(curLoop.back()).bbFlow;
+
+                    llvm::SmallPtrSet<BasicBlock*, 32> visitedBlocks;
+                    visitedBlocks.insert(curFlow.begin(), curFlow.end());
+
                     for (BasicBlock* EB : exits) {
-                        worklist.push_back(EB);
+                        bool allPredVisited = true;
+                        for (BasicBlock* Pred : predecessors(EB)) {
+                            if (!visitedBlocks.count(Pred) && !dstLoop->contains(Pred)) {
+                                allPredVisited = false;
+                                LLVM_DEBUG(tda::log() << "skip exit " << EB->getName()
+                                                      << " because predecessor " << Pred->getName()
+                                                      << " not in current flow\n");
+                                break;
+                            }
+                        }
+
+                        if (allPredVisited && queuedBlocks.insert(EB).second) {
+                            LLVM_DEBUG(tda::log() << "enqueue exit " << EB->getName() << "\n");
+                            worklist.push_back(EB);
+                        } else if (allPredVisited) {
+                            LLVM_DEBUG(tda::log() << "skip exit " << EB->getName() << " already queued\n");
+                        }
                     }
 
                     break;
@@ -656,9 +699,9 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
 
             updateSuccessorAnalyzer(CurAnalyzer, Term, NS);
         }
-        //GlobalStore->convexMerge(*CurAnalyzer);
+        
     }
-    //GlobalStore->convexMerge(*FunctionStore);
+    
     curFn.pop_back();
 }
 
@@ -667,7 +710,10 @@ FollowingPathResponse ModuleInterpreter::followPath(VRAFunctionInfo info, llvm::
     llvm::Loop* srcLoop = info.LI->getLoopFor(src);
     llvm::Loop* dstLoop = info.LI->getLoopFor(dst);
 
-    if (srcLoop && isLoopExit(srcLoop, dst)) return FollowingPathResponse::NO_ENQUE;
+    if (srcLoop && isLoopExit(srcLoop, dst)) {
+        LLVM_DEBUG(tda::log() << " (A) ");
+        return FollowingPathResponse::NO_ENQUE;
+    }
 
     llvm::SmallVector<llvm::BasicBlock *> curFlow;
     if (!srcLoop) curFlow = info.bbFlow;                                                                               // flow preso dal corpo della funzione
@@ -2335,8 +2381,32 @@ void ModuleInterpreter::walk(llvm::Loop* L) {
             updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt);
         else if (L) {
             // end flow but into the loop
-            LLVM_DEBUG(tda::log() << " end of loop " << L->getName() << ", enquing "<<L->getExitBlock()->getName()<<" \n");
-            updateKnownSuccessorAnalyzer(CurAnalyzer, L->getExitBlock());
+            llvm::SmallVector<llvm::BasicBlock*, 4> exits;
+            L->getExitBlocks(exits);
+
+            llvm::SmallPtrSet<llvm::BasicBlock*, 32> visitedBlocks;
+            visitedBlocks.insert(curFlow.begin(), curFlow.end());
+
+            llvm::BasicBlock* firstEligible = nullptr;
+            for (llvm::BasicBlock* EB : exits) {
+                bool allPredVisited = true;
+                for (llvm::BasicBlock* Pred : predecessors(EB)) {
+                    if (!visitedBlocks.count(Pred) && !L->contains(Pred)) {
+                        allPredVisited = false;
+                        break;
+                    }
+                }
+
+                if (allPredVisited) {
+                    firstEligible = EB;
+                    break;
+                }
+            }
+
+            if (firstEligible) {
+                LLVM_DEBUG(tda::log() << " end of loop " << L->getName() << ", enqueuing " << firstEligible->getName() << " \n");
+                updateKnownSuccessorAnalyzer(CurAnalyzer, firstEligible);
+            }
         }
     }
 
@@ -2348,8 +2418,10 @@ void ModuleInterpreter::propagateFunction(llvm::Function* F) {
     VRAFunctionInfo& VFI = FNs[F];
     curFn.push_back(F);
 
-    VFI.scope = FunctionScope(GlobalStore->newFnStore(*this));
-    VFI.scope.BBAnalyzers[&F->getEntryBlock()] = GlobalStore->newInstructionAnalyzer(*this);
+    if (!isFallback) {
+        VFI.scope = FunctionScope(GlobalStore->newFnStore(*this));
+        VFI.scope.BBAnalyzers[&F->getEntryBlock()] = GlobalStore->newInstructionAnalyzer(*this);
+    }
 
     walk();
 
@@ -2365,54 +2437,26 @@ void ModuleInterpreter::propagate() {
 
 void ModuleInterpreter::fallback() {
 
-    llvm::SmallVector<const Value*> memFalls;
-
     for (auto &Entry : FNs) {
         auto &VFI = Entry.second;
 
-        for (auto &LEntry : VFI.loops) {
-            auto &VLI = LEntry.second;
-            if (VLI.TripCount == 0)
-                VLI.TripCount = std::numeric_limits<uint64_t>::max();
-        }
+        for (auto RREntry = VFI.RRs.begin(); RREntry != VFI.RRs.end(); ) {
+            const llvm::Value* root = RREntry->first;
+            auto &VRI = RREntry->second;
 
-        for (auto &RREntry : VFI.RRs) {
-            const llvm::Value* root = RREntry.first;
-            auto &VRI = RREntry.second;
-
-            if (VRI.RR) continue;   //already solved
-
-            if (auto store = dyn_cast<StoreInst>(root)) {
-                memFalls.push_back(getBaseMemoryObject(store->getPointerOperand()));
-                LLVM_DEBUG(tda::log() << " STORE FALLING FOR OPERAND " << printInstrName(store) << "\n");
+            if (VRI.RR) {
+                RREntry++;
+                continue;   //already solved
             }
 
-            VRI.depsOnFn.clear();
-            VRI.depsOnFn.clear();
-            VRI.RR = std::make_shared<FakeRangedRecurrence>(nullptr, std::move(Range::Top().clone()));
-            VRI.lastRange = Range::Top().clone();
-            VRI.lastRangeComputedAt = std::numeric_limits<uint64_t>::max();
-            solvedRR.push_back(VRI.root);
+            auto Next = std::next(RREntry);
+            VFI.RRs.erase(RREntry);
+            RREntry = Next;
+            LLVM_DEBUG(tda::log() << "fallback applied on RR " << printInstrName(root) << " due to unrecognized or dependency unsolvable.\n");
+            solvedRR.push_back(root);
 
-            LLVM_DEBUG(tda::log() << "fallback applied on RR " << printInstrName(VRI.root) << " due to unrecognized or dependency unsolvable.\n");
-        }
-    }
+            if (isa<PHINode>(root)) phiFalledBack.push_back({Entry.first, root});
 
-    for (auto &Entry : FNs) {
-        auto &VFI = Entry.second;
-
-        for (auto &RREntry : VFI.RRs) {
-            const llvm::Value* root = RREntry.first;
-            auto &VRI = RREntry.second;
-
-            if (auto store = dyn_cast<StoreInst>(root)) {
-                auto memBase = getBaseMemoryObject(store->getPointerOperand());
-                if (std::find(memFalls.begin(), memFalls.end(), memBase) != memFalls.end()) {
-                    VRI.lastRange = Range::Top().clone();
-                    VRI.lastRangeComputedAt = std::numeric_limits<uint64_t>::max();
-                    LLVM_DEBUG(tda::log() << "reverted range for "<<printInstrName(VRI.root)<<" due to next unknown range\n");
-                }
-            }
         }
     }
 

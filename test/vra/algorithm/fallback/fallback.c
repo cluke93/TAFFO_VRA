@@ -21,17 +21,17 @@ static inline float rand_range(float min, float max) {
     return min + (max - min) * fast_rand01();
 }
 
-float data[R][C] __attribute__((annotate("scalar(range(-2, 3))")));
+float data[R][C] __attribute__((annotate("scalar(range(-1, 2))")));
 
 int main(int argc, char const *argv[])
 {
 
-    float __attribute__((annotate("scalar(range(0, 0))"))) sum_gt[1];
     float __attribute__((annotate("scalar(range(0, 0))"))) acc_gt[1];
+    float acc[R] __attribute__((annotate("scalar(range(0, 0))")));
 
     for (int i = 0; i < R; i++) {
         for (int j = 0; j < C; j++) {
-            data[i][j] = rand_range(-2.0f, 3.0f);
+            data[i][j] = rand_range(-0.01f, 0.03f);
         }
     }
 
@@ -47,18 +47,23 @@ int main(int argc, char const *argv[])
                     "mov %%eax, %1\n\t"
                     : "=r"(cycles_high), "=r"(cycles_low)::"%rax", "%rbx", "%rcx", "%rdx");
 
-        float __attribute__((annotate("scalar(range(0, 0))"))) sum = 0;
-        float __attribute__((annotate("scalar(range(0, 0))"))) acc = 0;
+        float __attribute__((annotate("scalar(range(0, 0))"))) grand_tot = 0;
         for (int i = 0; i < R; i++) {
+            acc[i] = 0;
             for (int j = 0; j < C; j++) {
-                sum += 3;
-                acc += data[i][j];
+                acc[i] += data[i][j];
             }
-            sum -= 1;
+
+            if (acc[i] > 2) {
+                acc[i] = 750.0f;    //something extra bound to check if bound grown
+            }
         }
 
-        sum_gt[0] = sum;
-        acc_gt[0] = acc;
+        for (int i = 1; i < R; i++) {
+            grand_tot += acc[i];
+        }
+
+        acc_gt[0] = grand_tot;  //bring outside
 
         asm volatile("RDTSCP\n\t"
                  "mov %%edx, %0\n\t"
@@ -72,9 +77,8 @@ int main(int argc, char const *argv[])
     }
 
     printf("Values Begin\n");
-    // for (int j = 0; j < R; ++j)
-    //     printf("%f\n", acc[j]);
-    printf("%f\n", sum_gt[0]);
+    for (int j = 0; j < R; ++j)
+        printf("%f\n", acc[j]);
     printf("%f\n", acc_gt[0]);
     printf("Values End\n");
 

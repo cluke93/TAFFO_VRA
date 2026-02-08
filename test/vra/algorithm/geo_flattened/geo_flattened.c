@@ -1,7 +1,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define M 1000
+#ifndef M
+#define M 1
+#endif
+
 #define R 100
 #define C 50
 

@@ -117,20 +117,8 @@ std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<Va
   if (scalarDst->isFinal())
     return scalarDst;
 
-  if (UseOldVRA) {
-    std::shared_ptr<Range> unionRange = scalarDst->range->join(scalarSrc->range);
-    return std::make_shared<ScalarInfo>(nullptr, unionRange);
-  } else {
-
-    if (!scalarSrc->range || scalarSrc->range->isTop()) {
-      if (scalarDst->range) {
-        return std::make_shared<ScalarInfo>(nullptr, scalarDst->range);
-      } else {
-        return std::make_shared<ScalarInfo>(nullptr, nullptr);
-      }
-    }
-    return std::make_shared<ScalarInfo>(nullptr, scalarSrc->range);
-  }
+  std::shared_ptr<Range> unionRange = scalarDst->range->join(scalarSrc->range);
+  return std::make_shared<ScalarInfo>(nullptr, unionRange);
 }
 
 void VRAStore::assignStructNode(const std::shared_ptr<ValueInfo>& dst, const std::shared_ptr<ValueInfo>& src) const {
