@@ -497,7 +497,7 @@ void ModuleInterpreter::resolve() {
         LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
 
         ++iteration;
-        if (MaxPropagation && iteration > MaxPropagation || solvedRR.size() == 0 && remainingUnsolvedRR > 0) {
+        if ((MaxPropagation && iteration > MaxPropagation) || (solvedRR.size() == 0 && remainingUnsolvedRR > 0)) {
             LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << MaxPropagation << " iteration(s) no fixed point reached: widening falling back remaining RR and last iteration\n");
             fallback();
             isFallback = true;
@@ -541,10 +541,7 @@ void ModuleInterpreter::resolve() {
 void ModuleInterpreter::preSeed() {
 
     for (Function& F : M) {
-        if (!F.empty() && (TaffoInfo::getInstance().isStartingPoint(F)) && F.getName() == "main") {
-
-            FNs.try_emplace(&F, VRAFunctionInfo(&F, getMAM()));
-
+        if (!F.empty() && (TaffoInfo::getInstance().isStartingPoint(F))) {
             interpretFunction(&F);
             EntryFn = &F;
         }
@@ -567,6 +564,7 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
         return;
     }
 
+    FNs.try_emplace(F, VRAFunctionInfo(F, getMAM()));
     VRAFunctionInfo& VFI = FNs[F];
 
     if (!FunctionStore)
@@ -818,7 +816,6 @@ void ModuleInterpreter::resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, l
 
     CurAnalyzer->prepareForCallPropagation(I, FunctionStore);
     propagateFunction(F, FunctionStore);
-    LLVM_DEBUG(tda::log() << "\nPropagation of function "<<F->getName()<<" ended, previous context restored\n\n");
     CurAnalyzer->returnFromCallPropagation(I, FunctionStore);
 }
 
@@ -2418,7 +2415,7 @@ void ModuleInterpreter::propagateFunction(llvm::Function* F, std::shared_ptr<Ana
     VRAFunctionInfo& VFI = FNs[F];
     curFn.push_back(F);
 
-    if (!isFallback && FunctionStore == nullptr) {
+    if (!isFallback && !FunctionStore) {
         VFI.scope = FunctionScope(GlobalStore->newFnStore(*this));
         VFI.scope.BBAnalyzers[&F->getEntryBlock()] = GlobalStore->newInstructionAnalyzer(*this);
     }

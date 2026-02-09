@@ -254,8 +254,7 @@ void VRAnalyzer::prepareForCall(Instruction* I, std::shared_ptr<AnalysisStore> F
   // fetch ranges of arguments
   std::list<std::shared_ptr<ValueInfo>> ArgRanges;
   for (Value* Arg : CB->args()) {
-    auto node = getNode(Arg);
-    ArgRanges.push_back(node);
+    ArgRanges.push_back(getNode(Arg));
     LLVM_DEBUG(log() << VRALogger::toString(fetchRangeNode(Arg)) << ", ");
   }
   LLVM_DEBUG(log() << "\n");
@@ -278,7 +277,7 @@ void VRAnalyzer::prepareForCallPropagation(Instruction* I, std::shared_ptr<Analy
   assert(!CB->isIndirectCall());
 
   LLVM_DEBUG(Logger->logInstruction(I));
-  LLVM_DEBUG(Logger->logInfoln("preparing for function propagation..."));
+  LLVM_DEBUG(Logger->logInfoln("preparing for function interpretation..."));
 
   LLVM_DEBUG(
     Logger->lineHead();
@@ -286,9 +285,8 @@ void VRAnalyzer::prepareForCallPropagation(Instruction* I, std::shared_ptr<Analy
   // fetch ranges of arguments
   std::list<std::shared_ptr<ValueInfo>> ArgRanges;
   for (Value* Arg : CB->args()) {
-    auto node = getNode(Arg);
-    ArgRanges.push_back(node);
-    LLVM_DEBUG(tda::log() << "\nincoming range ["<<Arg<<"] " << (getRange(node) ? getRange(node)->toString() : "") << "\n");
+    ArgRanges.push_back(getNode(Arg));
+    LLVM_DEBUG(log() << VRALogger::toString(fetchRangeNode(Arg)) << ", ");
   }
   LLVM_DEBUG(log() << "\n");
 
@@ -303,9 +301,6 @@ void VRAnalyzer::returnFromCallPropagation(Instruction* I, std::shared_ptr<Analy
   LLVM_DEBUG(
     Logger->logInstruction(I);
     Logger->logInfo("returning from call"));
-
-  const std::shared_ptr<Range> oldInfo = fetchRange(I);
-  
 
   std::shared_ptr<VRAFunctionStore> FStore = std::static_ptr_cast<VRAFunctionStore>(FunctionStore);
   std::shared_ptr<ValueInfo> Ret = FStore->getRetVal();
@@ -872,9 +867,7 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount) {
       const Value* op = PN->getIncomingValue(0);
       std::shared_ptr<ValueInfo> op_node = getNode(op);
       if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
-        // Do NOT mutate the operand's ScalarInfo, otherwise we pollute the
-        // range of the constant/initial value (e.g., 0.0) and reuse it later.
-        // Instead, build a fresh node for the PHI.
+
         auto phiStart = std::make_shared<ScalarInfo>(nullptr, joinedRange);
         setNode(VRI.root, phiStart);
         LLVM_DEBUG(Logger->logRangeln(phiStart));
