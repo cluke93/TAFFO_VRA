@@ -2,6 +2,7 @@
 #include "CodeInterpreter.hpp"
 #include "VRALogger.hpp"
 #include "RangedRecurrences.hpp"
+#include <llvm/Analysis/ValueTracking.h>
 
 #include <llvm/IR/Dominators.h>
 #include <llvm/Analysis/ScalarEvolution.h>
@@ -38,7 +39,20 @@ struct VRALoopInfo {
 
     llvm::SmallVector<llvm::BasicBlock*> bbFlow;
 
-    bool isInvariant(const llvm::Value* V) { return L->isLoopInvariant(V); }
+    bool isInvariant(const llvm::Value* V) { 
+
+        if (!V) return true;
+        auto *I = dyn_cast<llvm::Instruction>(V);
+
+        if (I && !L->contains(I)) return true;
+        if (L->isLoopInvariant(V)) return true;
+
+        if (!I || !isSafeToSpeculativelyExecute(I)) return false;
+
+        for (const llvm::Value *Op : I->operands())
+            if (!isInvariant(Op)) return false;
+        return true;
+    }
 
     /// @brief check if all blocks of the loop are visited
     /// @return true is whole visited (all latches are visited), false otherwise

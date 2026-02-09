@@ -449,9 +449,6 @@ void ModuleInterpreter::computeRecurrenceSummary() {
 }
 
 void ModuleInterpreter::printRecurrenceSummary(llvm::raw_ostream &OS) const {
-    // When LLVM statistics are enabled (-stats), our STATISTIC counters will be
-    // printed in the unified "Statistics Collected" block. Skip the custom
-    // banner to avoid duplicate headers.
     if (llvm::AreStatisticsEnabled())
         return;
 
@@ -506,17 +503,6 @@ void ModuleInterpreter::resolve() {
 
     if (isFallback) {
         propagate();
-        // for (auto &[F, V] : phiFalledBack) {
-        //     auto FnIt = FNs.find(const_cast<llvm::Function*>(F));
-        //     if (FnIt == FNs.end())
-        //         continue;
-
-        //     llvm::Instruction *Phi = llvm::cast<llvm::Instruction>(const_cast<llvm::Value*>(V));
-        //     auto &Analyzers = FnIt->second.scope.BBAnalyzers;
-        //     auto BBAIt = Analyzers.find(Phi->getParent());
-        //     if (BBAIt != Analyzers.end())
-        //         BBAIt->second->analyzeInstruction(Phi);
-        // }
 
         LLVM_DEBUG(tda::log() << "\n\n------------------------------------------------------------------------------\n");
         LLVM_DEBUG(tda::log() << "Fallback completed: final join of "<<phiFalledBack.size()<<" falled back recurrence over phi nodes\n");
