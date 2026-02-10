@@ -14,18 +14,38 @@ jobs:
 
     steps:
 
+    - uses: actions/checkout@v4
+
     - name: Dependencies
-      run: apt-get install -y python3 python3-pip protobuf-compiler lsb-release clang-format-19
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          git \
+          gcc \
+          g++ \
+          ninja-build \
+          python3 \
+          python3-pip \
+          python3-venv \
+          protobuf-compiler \
+          lsb-release \
+          clang-format-19
 
     - name: Python Dependencies
-      run: pip install -r requirements.txt
-
-    - uses: actions/checkout@v4
+      run: |
+        cd ${{github.workspace}}
+        python3 -m venv .venv
+        . .venv/bin/activate
+        pip install -r requirements.txt
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -DLLVM_DIR="/opt/llvm-18" -DCMAKE_PREFIX_PATH="/opt/or-tools"
+      run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G Ninja \
+        -CMAKE_C_COMPILER=gcc \
+        -CMAKE_C_COMPILER=g++ \
+        -DTAFFO_UNITTESTS=ON \
+        -DLLVM_DIR="/opt/llvm-18"
 
     - name: Build
       # Build your program with the given configuration
@@ -36,6 +56,7 @@ jobs:
     - name: Test
       env:
         LD_LIBRARY_PATH: /opt/or-tools/lib:/opt/llvm-18/lib
-      # Execute tests defined by the CMake configuration.
-      # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
-      run: ctest --test-dir ${{github.workspace}}/build -j $(nproc) --output-on-failure --timeout 3600
+      run: |
+        cd ${{github.workspace}}
+        . .venv/bin/activate
+        ctest --test-dir ${{github.workspace}}/build -j $(nproc) --output-on-failure --timeout 3600
