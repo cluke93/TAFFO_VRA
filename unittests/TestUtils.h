@@ -1,7 +1,7 @@
 #ifndef __TAFFO_TEST_UTILS_H__
 #define __TAFFO_TEST_UTILS_H__
 
-#include "TaffoUtils/InputInfo.h"
+// #include "TaffoUtils/InputInfo.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
