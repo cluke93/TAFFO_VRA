@@ -39,15 +39,11 @@ jobs:
         pip install -r requirements.txt
 
     - name: Configure CMake
-      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
       run: |
         cd ${GITHUB_WORKSPACE}
-        cmake -S ${GITHUB_WORKSPACE} -B ${GITHUB_WORKSPACE}/build -G Ninja \
-          -CMAKE_C_COMPILER=gcc \
-          -CMAKE_C_COMPILER=g++ \
+        cmake -S ${GITHUB_WORKSPACE} -B ${GITHUB_WORKSPACE}/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DTAFFO_UNITTESTS=ON \
-          -DLLVM_DIR="/opt/llvm-18"
+          -DLLVM_DIR=/opt/llvm-18
 
     - name: Build
       # Build your program with the given configuration
