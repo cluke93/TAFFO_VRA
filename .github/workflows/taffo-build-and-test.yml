@@ -14,6 +14,11 @@ jobs:
 
     steps:
 
+    - name: Install git
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends  git
+
     - uses: actions/checkout@v6.0.2
       with:
         submodules: recursive
@@ -22,7 +27,6 @@ jobs:
       run: |
         apt-get update
         apt-get install -y --no-install-recommends \
-          git \
           gcc \
           g++ \
           ninja-build \
