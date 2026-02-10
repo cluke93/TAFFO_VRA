@@ -17,7 +17,7 @@ jobs:
     - name: Install git
       run: |
         apt-get update
-        apt-get install -y --no-install-recommends  git
+        apt-get install -y --no-install-recommends git
 
     - uses: actions/checkout@v6.0.2
       with:
@@ -47,7 +47,7 @@ jobs:
     - name: Configure CMake
       run: |
         cd ${GITHUB_WORKSPACE}
-        cmake -S ${GITHUB_WORKSPACE} -B ${GITHUB_WORKSPACE}/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        cmake -S ${GITHUB_WORKSPACE} -B ${GITHUB_WORKSPACE}/build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
           -DTAFFO_UNITTESTS=ON \
           -DLLVM_DIR=/opt/llvm-18
 
