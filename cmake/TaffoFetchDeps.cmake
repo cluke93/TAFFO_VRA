@@ -53,11 +53,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
-execute_process(
-  COMMAND git submodule update --init --recursive
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  RESULT_VARIABLE SUBMOD_RET)
+if(TAFFO_SUBMOD_UPDATE)
+  execute_process(
+    COMMAND git submodule update --init --recursive
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    RESULT_VARIABLE SUBMOD_RET)
 
-if (NOT SUBMOD_RET EQUAL 0)
-  message(FATAL_ERROR "Submodule sync failed")
+  if(NOT SUBMOD_RET EQUAL 0)
+    message(FATAL_ERROR "Submodule sync failed")
+  endif()
 endif()
