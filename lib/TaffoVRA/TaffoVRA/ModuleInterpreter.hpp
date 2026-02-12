@@ -166,7 +166,7 @@ class ModuleInterpreter {
 public:
 
     std::shared_ptr<AnalysisStore> getStoreForValue(const llvm::Value* V) const;
-    std::shared_ptr<AnalysisStore> getGlobalStore() const { return GlobalStore; }
+    std::shared_ptr<VRAGlobalStore> getGlobalStore() const { return GlobalStore; }
     std::shared_ptr<AnalysisStore> getFunctionStore() const {
         if (curFn.empty())
             return nullptr;
@@ -196,7 +196,7 @@ public:
     // method to embed fixed-point loop and avoid recall preseed and inspect
     void resolve();
 
-    ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, std::shared_ptr<AnalysisStore> GlobalStore);
+    ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM);
 
 protected:
 
@@ -223,7 +223,7 @@ protected:
 
     bool analyzeSolvability(const llvm::Value* cur, VRAFunctionInfo& VFI, VRARecurrenceInfo& VRI, VRALoopInfo& VLI);
     bool isSolvableDependenceTreeBackwark(const llvm::Value *V, llvm::Loop* L, VRARecurrenceInfo& VRI);
-    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock);
+    void updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, const llvm::BasicBlock* curBlock);
 
     bool isFakeRecurrence(VRARecurrenceInfo& VRI);
 
@@ -256,7 +256,6 @@ protected:
 
     // resolve all locked loops and RR after last iteration and iterate one again
     void fallback();
-    void fallbackCMP();
 
     // Statistic methods
     size_t countLoops() {
@@ -288,7 +287,7 @@ protected:
 private:
 
     llvm::Module& M;
-    std::shared_ptr<AnalysisStore> GlobalStore;
+    std::shared_ptr<VRAGlobalStore> GlobalStore;
     llvm::SmallVector<llvm::Function*, 4U> curFn;    //current function scope
     llvm::ModuleAnalysisManager& MAM;
 

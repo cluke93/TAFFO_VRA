@@ -40,6 +40,65 @@ std::shared_ptr<AnalysisStore> VRAGlobalStore::newFnStore(ModuleInterpreter& MI)
   return std::make_shared<VRAFunctionStore>(std::static_ptr_cast<VRALogger>(MI.getGlobalStore()->getLogger()));
 }
 
+#include <cmath>
+
+namespace {
+
+constexpr double kHardRangeLimit = 1e15;
+
+static bool isRangeTooHighHard(const taffo::Range &R) {
+  if (std::isnan(R.min) || std::isnan(R.max)) return true;
+  if (std::isinf(R.min) || std::isinf(R.max)) return true;
+
+  return (std::fabs(R.min) > kHardRangeLimit) || (std::fabs(R.max) > kHardRangeLimit);
+}
+
+static void dropTooHighRangesHard(const std::shared_ptr<taffo::ValueInfoWithRange> &VI, llvm::Value *Owner) {
+
+  if (!VI) return;
+
+  if (auto SI = std::dynamic_ptr_cast<taffo::ScalarInfo>(VI)) {
+    if (SI->range && isRangeTooHighHard(*SI->range)) {
+
+      LLVM_DEBUG({
+        llvm::errs() << "[VRA][DROP] Range too large for ";
+        if (Owner) {
+          Owner->print(llvm::errs());
+        } else {
+          llvm::errs() << "<unknown>";
+        }
+        llvm::errs() << " -> ["
+                     << SI->range->min << ", "
+                     << SI->range->max << "]\n";
+      });
+
+      SI->range = nullptr;  // <-- SET NULL
+    }
+    return;
+  }
+
+  if (auto ST = std::dynamic_ptr_cast<taffo::StructInfo>(VI)) {
+    for (unsigned i = 0; i < ST->getNumFields(); ++i) {
+      auto Field = ST->getField(i);
+      if (!Field) continue;
+
+      if (auto Fwr = std::dynamic_ptr_cast<taffo::ValueInfoWithRange>(Field))
+        dropTooHighRangesHard(Fwr, Owner);
+    }
+  }
+}
+
+static std::shared_ptr<taffo::ValueInfoWithRange> cloneAndDropTooHighHard(const std::shared_ptr<taffo::ValueInfoWithRange> &VI, llvm::Value *Owner) {
+
+  if (!VI) return nullptr;
+  auto C = VI->clone<taffo::ValueInfoWithRange>();
+  dropTooHighRangesHard(C, Owner);
+  return C;
+}
+
+} // namespace
+
+
 ////////////////////////////////////////////////////////////////////////////////
 // Metadata Processing
 ////////////////////////////////////////////////////////////////////////////////
@@ -158,10 +217,13 @@ void VRAGlobalStore::saveResults(Module& m) {
   TaffoInfo& taffoInfo = TaffoInfo::getInstance();
   for (GlobalVariable& v : m.globals()) {
     if (const std::shared_ptr<ValueInfoWithRange> valueInfoWithRange = fetchRangeNode(&v)) {
+
+      auto sanitized = cloneAndDropTooHighHard(valueInfoWithRange, &v);
+
       // retrieve existing info about global var v, if any
       if (taffoInfo.hasValueInfo(v)) {
         std::shared_ptr<ValueInfo> copiedValueInfo = taffoInfo.getValueInfo(v)->clone();
-        updateValueInfo(copiedValueInfo, valueInfoWithRange);
+        updateValueInfo(copiedValueInfo, sanitized);
         taffoInfo.setValueInfo(v, copiedValueInfo);
       }
       else {
@@ -174,8 +236,10 @@ void VRAGlobalStore::saveResults(Module& m) {
   for (Function& f : m.functions()) {
     for (Argument& arg : f.args())
       if (const std::shared_ptr<ValueInfoWithRange> argInfoWithRange = fetchRangeNode(&arg)) {
+        auto sanitized = cloneAndDropTooHighHard(argInfoWithRange, &arg);
+
         if (taffoInfo.hasValueInfo(arg))
-          updateValueInfo(taffoInfo.getValueInfo(arg), argInfoWithRange);
+          updateValueInfo(taffoInfo.getValueInfo(arg), sanitized);
         else
           taffoInfo.setValueInfo(arg, argInfoWithRange);
       }
@@ -187,12 +251,15 @@ void VRAGlobalStore::saveResults(Module& m) {
         if (inst.getOpcode() == Instruction::Store)
           continue;
         if (const std::shared_ptr<ValueInfoWithRange> valueInfoWithRange = fetchRangeNode(&inst)) {
+
+          auto sanitized = cloneAndDropTooHighHard(valueInfoWithRange, &inst);
+
           if (taffoInfo.hasValueInfo(inst)) {
             std::shared_ptr<ValueInfo> copiedValueInfo = taffoInfo.getValueInfo(inst)->clone();
-            updateValueInfo(copiedValueInfo, valueInfoWithRange);
+            updateValueInfo(copiedValueInfo, sanitized);
             taffoInfo.setValueInfo(inst, copiedValueInfo);
           }
-          else if (std::shared_ptr<ValueInfo> newValueInfo = valueInfoWithRange) {
+          else if (std::shared_ptr<ValueInfo> newValueInfo = sanitized) {
             if (std::isa_ptr<ScalarInfo>(newValueInfo) || getFullyUnwrappedType(&inst)->isStructTy())
               taffoInfo.setValueInfo(inst, newValueInfo);
           }

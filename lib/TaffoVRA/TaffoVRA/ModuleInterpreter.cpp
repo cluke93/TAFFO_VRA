@@ -3,6 +3,7 @@
 #include "TaffoInfo/TaffoInfo.hpp"
 #include "VRAFunctionStore.hpp"
 #include "VRAGlobalStore.hpp"
+#include "VRAStore.hpp"
 #include "VRAnalyzer.hpp"
 
 #include <llvm/ADT/APFloat.h>
@@ -17,6 +18,8 @@
 #include <cassert>
 #include <deque>
 #include <vector>
+#include <string>
+#include <sstream>
 
 #define DEBUG_TYPE "taffo-vra"
 
@@ -399,9 +402,8 @@ std::shared_ptr<AnalysisStore> ModuleInterpreter::getStoreForValue(const llvm::V
     return nullptr;
 }
 
-ModuleInterpreter::ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, std::shared_ptr<AnalysisStore> GlobalStore): 
-    M(M), GlobalStore(GlobalStore), curFn(), MAM(MAM), FNs() {
-        auto GS = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
+ModuleInterpreter::ModuleInterpreter(llvm::Module& M, llvm::ModuleAnalysisManager& MAM): 
+    M(M), GlobalStore(nullptr), curFn(), MAM(MAM), FNs() {
 }
 
 void ModuleInterpreter::interpret() {
@@ -509,13 +511,8 @@ void ModuleInterpreter::resolve() {
         LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
     }
 
-    // do final convex merge from the fix-pointed last scopes
-    for (auto [F,VFI] : FNs) {
-        for (auto [_, BBA] : VFI.scope.BBAnalyzers) {
-            GlobalStore->convexMerge(*BBA);
-        }
-        GlobalStore->convexMerge(*VFI.scope.FunctionStore);
-    }
+    LLVM_DEBUG(tda::log() << "saving results...\n");
+    GlobalStore->saveResults(M);
 
     computeRecurrenceSummary();
 }
@@ -528,6 +525,11 @@ void ModuleInterpreter::preSeed() {
 
     for (Function& F : M) {
         if (!F.empty() && (TaffoInfo::getInstance().isStartingPoint(F))) {
+
+            //empty scope
+            GlobalStore = std::make_shared<VRAGlobalStore>();
+            GlobalStore->harvestValueInfo(M);
+
             interpretFunction(&F);
             EntryFn = &F;
         }
@@ -684,7 +686,9 @@ void ModuleInterpreter::interpretFunction(llvm::Function* F, std::shared_ptr<Ana
             updateSuccessorAnalyzer(CurAnalyzer, Term, NS);
         }
         
+        GlobalStore->convexMerge(*CurAnalyzer);
     }
+    GlobalStore->convexMerge(*FunctionStore);
     
     curFn.pop_back();
 }
@@ -763,7 +767,7 @@ void ModuleInterpreter::updateSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> Cu
     CurrentAnalyzer->setPathLocalInfo(SuccAnalyzer, TermInstr, SuccIdx);
 }
 
-void ModuleInterpreter::updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock) {
+void ModuleInterpreter::updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyzer> CurrentAnalyzer, llvm::BasicBlock* nextBlock, const llvm::BasicBlock* curBlock) {
     llvm::DenseMap<llvm::BasicBlock*, std::shared_ptr<CodeAnalyzer>>& BBAnalyzers = FNs[curFn.back()].scope.BBAnalyzers;
     std::shared_ptr<CodeAnalyzer> SuccAnalyzer;
     auto SAIt = BBAnalyzers.find(nextBlock);
@@ -775,6 +779,47 @@ void ModuleInterpreter::updateKnownSuccessorAnalyzer(std::shared_ptr<CodeAnalyze
         SuccAnalyzer = SAIt->second;
         SuccAnalyzer->convexMerge(*CurrentAnalyzer);
     }
+
+    // remove comment in case of desperate debugging
+    // auto *CurVRA = CurrentAnalyzer &&
+    //                CurrentAnalyzer->getKind() == AnalysisStore::ASK_VRAnalyzer
+    //                  ? static_cast<VRAnalyzer*>(CurrentAnalyzer.get())
+    //                  : nullptr;
+    // auto *SuccVRA = SuccAnalyzer &&
+    //                 SuccAnalyzer->getKind() == AnalysisStore::ASK_VRAnalyzer
+    //                   ? static_cast<VRAnalyzer*>(SuccAnalyzer.get())
+    //                   : nullptr;
+    // if (!CurVRA || !SuccVRA)
+    //     return;
+
+    // auto printAnalyzerState = [](VRAnalyzer* Analyzer, const std::string& Title) {
+    //     auto Logger = std::static_pointer_cast<VRALogger>(Analyzer->getLogger());
+    //     if (!Logger)
+    //         return;
+
+    //     Logger->lineHead();
+    //     tda::log() << Title << "\n";
+
+    //     for (const auto& Entry : Analyzer->getAllDerivedRanges()) {
+    //         const llvm::Value* V = Entry.first;
+    //         const std::shared_ptr<ValueInfo>& VI = Entry.second;
+    //         Logger->logInstruction(V);
+    //         Logger->logRangeln(VI);
+    //         Logger->lineHead();
+    //         tda::log() << "PTR: " << static_cast<const void*>(V) << "\n";
+    //     }
+    // };
+
+    // std::ostringstream curSs;
+    // curSs << "\nCurrentAnalyzer state (from " << curBlock->getName().str()
+    //       << ", curBlock=" << static_cast<const void*>(curBlock) << "):";
+
+    // std::ostringstream succSs;
+    // succSs << "\nSuccAnalyzer state (to " << nextBlock->getName().str()
+    //        << ", nextBlock=" << static_cast<const void*>(nextBlock) << "):";
+
+    // printAnalyzerState(CurVRA, curSs.str());
+    // printAnalyzerState(SuccVRA, succSs.str());
 }
 
 void ModuleInterpreter::interpretCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, llvm::Instruction* I) {
@@ -796,10 +841,10 @@ void ModuleInterpreter::resolveCall(std::shared_ptr<CodeAnalyzer> CurAnalyzer, l
     if (!F || F->empty())
         return;
 
-    std::shared_ptr<AnalysisStore> FunctionStore = FNs[F].scope.FunctionStore;
-    if (!FunctionStore)
-      FunctionStore = GlobalStore->newFnStore(*this);
-
+    std::shared_ptr<AnalysisStore> FunctionStore = GlobalStore->newFnStore(*this);
+    FNs[F].scope = FunctionScope(FunctionStore);
+    FNs[F].scope.BBAnalyzers[&F->getEntryBlock()] = GlobalStore->newInstructionAnalyzer(*this);
+    
     CurAnalyzer->prepareForCallPropagation(I, FunctionStore);
     propagateFunction(F, FunctionStore);
     CurAnalyzer->returnFromCallPropagation(I, FunctionStore);
@@ -1295,13 +1340,13 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
             
             VRI.depsOnFn.clear();
         } else {
-            LLVM_DEBUG(tda::log() << " call invariant operand, cur range usable\n");
+            //LLVM_DEBUG(tda::log() << " call invariant operand, cur range usable\n");
         }
     }
     else if (!VLI.isInvariant(cur)) {
         if (auto Load = dyn_cast<LoadInst>(cur)) {
             auto IVs = getInductionFromLoad(Load, VFI.LI); 
-            LLVM_DEBUG(if (!IVs.empty()) { tda::log() << " (IVs: "; for (auto *IV : IVs) tda::log() << IV->getName() << " "; tda::log() << ") "; });
+            //LLVM_DEBUG(if (!IVs.empty()) { tda::log() << " (IVs: "; for (auto *IV : IVs) tda::log() << IV->getName() << " "; tda::log() << ") "; });
             bool IVSolved = false;
             for (const auto *IV : IVs) {
                 if (VFI.RRs.count(IV) && VFI.RRs[IV].lastRange) {
@@ -1316,7 +1361,7 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
                 if (LoadBase) {
                     
                     if ((VRI.loadJunction && IVs.size() > getInductionFromLoad(VRI.loadJunction, VFI.LI).size()) || isa<PHINode>(VRI.root)) {
-                        LLVM_DEBUG(tda::log() << " found load from array with higher dim: " << Load << "\n");
+                        //LLVM_DEBUG(tda::log() << " found load from array with higher dim: " << Load << "\n");
                         VRI.loadHigherDim = dyn_cast<LoadInst>(Load);
                     }
 
@@ -1327,7 +1372,7 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
 
                         if (!RR.lastRange && isBefore(R, Load)) {
                             VRI.depsOnRR.push_back(const_cast<llvm::Value*>(R));
-                            LLVM_DEBUG(tda::log() << " dep on past store unsolved ");
+                            //LLVM_DEBUG(tda::log() << " dep on past store unsolved ");
                             return false;
                         }
                     }
@@ -1336,17 +1381,17 @@ bool ModuleInterpreter::analyzeSolvability(const llvm::Value* cur, VRAFunctionIn
             }
             
         } else {
-LLVM_DEBUG(tda::log() << " (B) ");
+            
             if (!VFI.RRs.count(cur)) {
                 auto PHIs = collectInfluencingHeaderPHIs(cur, dyn_cast<Instruction>(cur), *VFI.LI);
                 for (auto PHI : PHIs) {
-                    LLVM_DEBUG(tda::log() << " trovato phi radice: "<<PHI->getName() << "| ");
+                    //LLVM_DEBUG(tda::log() << " trovato phi radice: "<<PHI->getName() << "| ");
                     if (VFI.RRs.count(PHI) && VFI.RRs[PHI].lastRange)
                         return true;
                     VRI.depsOnRR.push_back(const_cast<llvm::Value*>(dyn_cast<Value>(PHI)));
                     return false;
                 }
-                LLVM_DEBUG(tda::log() << " (D) ");
+                
             } else {
                 if (VFI.RRs.count(cur) && VFI.RRs[cur].lastRange)
                     return true;
@@ -1355,7 +1400,7 @@ LLVM_DEBUG(tda::log() << " (B) ");
             }
         }
     }
-    LLVM_DEBUG(tda::log() << " (E) ");
+    
     return true;
 }
 
@@ -1386,7 +1431,7 @@ bool ModuleInterpreter::isSolvableDependenceTreeBackwark(const llvm::Value *V, l
     while (!worklist.empty()) {
         const Value *cur = worklist.pop_back_val();
         if (!visited.insert(cur).second) continue;
-        LLVM_DEBUG(tda::log() << " (analyzing backward " << printInstrName(cur) << ") => \n");
+        //LLVM_DEBUG(tda::log() << " (analyzing backward " << printInstrName(cur) << ") => \n");
 
         if (!analyzeSolvability(cur, VFI, VRI, VLI)) return false;
         
@@ -1398,7 +1443,6 @@ bool ModuleInterpreter::isSolvableDependenceTreeBackwark(const llvm::Value *V, l
         }
     }
 
-    LLVM_DEBUG(tda::log() << "\n");
     return true;
 }
 
@@ -1430,7 +1474,6 @@ bool ModuleInterpreter::isAffineRecurrence(VRARecurrenceInfo& VRI) {
     if (VRI.kind != VRAInspectionKind::REC) return false;
     LLVM_DEBUG(tda::log() << "\t\ttry to recognize as affine recurrence... \n");
 
-    auto GStore = std::static_pointer_cast<VRAGlobalStore>(GlobalStore);
     const auto* InstrRoot = llvm::dyn_cast<llvm::Instruction>(VRI.root);
     llvm::Function* F = const_cast<llvm::Function*>(InstrRoot->getParent()->getParent());
     VRAFunctionInfo &VFI = FNs[F];
@@ -1659,10 +1702,9 @@ bool ModuleInterpreter::isCrossingAffineRecurrence(VRAAssignationInfo& VAI) {
         const llvm::Value* curLoad = nullptr;
         const llvm::LoadInst* curLoadInst = nullptr;
         for (const auto* loadPtr : VAI.loads) {
-            if (!curLoad) { LLVM_DEBUG(tda::log() << "\n(BASE CAND: " << printInstrName(loadPtr) << ")\n"); 
+            if (!curLoad) {
                 curLoad = getBaseMemoryObject(loadPtr->getPointerOperand()); }
             else if (getBaseMemoryObject(loadPtr->getPointerOperand()) != curLoad) { 
-                LLVM_DEBUG(tda::log() << " (FOUND DIFF BASE " << printInstrName(loadPtr) << "): abort\n"); 
                 return false;
             }
             curLoadInst = loadPtr;
@@ -1681,7 +1723,6 @@ bool ModuleInterpreter::isCrossingAffineRecurrence(VRAAssignationInfo& VAI) {
         
         const int64_t delta = StoreOff - LoadOff;
         if (std::abs(delta) != 1) {
-            LLVM_DEBUG(tda::log() << " delta idx not 1: abort\n");
             return false;
         }
 
@@ -2200,7 +2241,7 @@ void ModuleInterpreter::tripCount() {
             const llvm::Loop *L = LEntry.first;
             auto &VLI = LEntry.second;
 
-            if (VLI.TripCount > 0) continue;
+            if (VLI.TripCount > 0 || !VLI.InductionVariable) continue;
 
             auto It = VFI.RRs.find(VLI.InductionVariable);
             if (It == VFI.RRs.end()) {
@@ -2290,10 +2331,15 @@ void ModuleInterpreter::tripCount() {
                     LLVM_DEBUG(tda::log() << "todo: add here other heuristics\n");
                 }
 
-                if (computed) {
+                if (computed && TripC > 0) {
                     VLI.TripCount = TripC;
                     VLI.Reason = TripCountReason::HeuristicFallback;
                     LLVM_DEBUG(tda::log() << "[VRA] >> [TripCount] >> FN["<<F->getName()<<"] - trip count for loop " << VLI.L->getName() << " (affine growth) = " << TripC << "\n");
+                    solvedTC++;
+                } else {
+                    VLI.TripCount = 1;  //cerotto: eseguire comunque una iterazione per evitare null ranges
+                    VLI.Reason = TripCountReason::Unknown;
+                    LLVM_DEBUG(tda::log() << "[VRA] >> [TripCount] >> FN["<<F->getName()<<"] - trip count for loop " << VLI.L->getName() << " (FALLBACK) = 1\n");
                     solvedTC++;
                 }
             }
@@ -2361,7 +2407,7 @@ void ModuleInterpreter::walk(llvm::Loop* L) {
         
         auto nextIt = std::next(it);
         if (nextIt != curFlow.end())
-            updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt);
+            updateKnownSuccessorAnalyzer(CurAnalyzer, *nextIt, curBlock);
         else if (L) {
             // end flow but into the loop
             llvm::SmallVector<llvm::BasicBlock*, 4> exits;
@@ -2388,9 +2434,11 @@ void ModuleInterpreter::walk(llvm::Loop* L) {
 
             if (firstEligible) {
                 LLVM_DEBUG(tda::log() << " end of loop " << L->getName() << ", enqueuing " << firstEligible->getName() << " \n");
-                updateKnownSuccessorAnalyzer(CurAnalyzer, firstEligible);
+                updateKnownSuccessorAnalyzer(CurAnalyzer, firstEligible, curBlock);
             }
         }
+
+        GlobalStore->convexMerge(*CurAnalyzer);
     }
 
 }
@@ -2402,12 +2450,15 @@ void ModuleInterpreter::propagateFunction(llvm::Function* F, std::shared_ptr<Ana
     curFn.push_back(F);
 
     if (!isFallback && !FunctionStore) {
-        VFI.scope = FunctionScope(GlobalStore->newFnStore(*this));
+        FunctionStore = GlobalStore->newFnStore(*this);
+        VFI.scope = FunctionScope(FunctionStore);
         VFI.scope.BBAnalyzers[&F->getEntryBlock()] = GlobalStore->newInstructionAnalyzer(*this);
+    } else {
+        if (FNs.count(F)) FunctionStore = FNs[F].scope.FunctionStore;
     }
-
     walk();
 
+    GlobalStore->convexMerge(*FunctionStore);
     curFn.pop_back();
 
     LLVM_DEBUG(tda::log() << "\n\n[VRA] >> [Propagation] >> FN[" << F->getName() << "] - PROPAGATION ENDED\n");
@@ -2415,7 +2466,12 @@ void ModuleInterpreter::propagateFunction(llvm::Function* F, std::shared_ptr<Ana
 
 void ModuleInterpreter::propagate() {
     curFn.clear();
-    propagateFunction(EntryFn);
+
+    //reset global scope
+    GlobalStore = std::make_shared<VRAGlobalStore>();
+    GlobalStore->harvestValueInfo(M);
+
+    propagateFunction(EntryFn, nullptr);
 }
 
 void ModuleInterpreter::fallback() {
@@ -2443,25 +2499,6 @@ void ModuleInterpreter::fallback() {
         }
     }
 
-}
-
-
-void ModuleInterpreter::fallbackCMP() {
-    for (auto &Entry : FNs) {
-        llvm::Function *F = Entry.first;
-        
-        for (const llvm::BasicBlock &BB : *F) {
-            for (const llvm::Instruction &I : BB) {
-                if (const auto *CI = llvm::dyn_cast<llvm::CmpInst>(&I)) {
-                    if (auto SV = getStoreForValue(CI)) {
-                        if (auto SFV = std::static_pointer_cast<VRAnalyzer>(SV)) {
-                            SFV->fallbackCMP(&I);
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 }   // end of namespace taffo

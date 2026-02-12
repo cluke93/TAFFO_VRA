@@ -802,14 +802,6 @@ void VRAnalyzer::logRangeln(const Value* v) {
   LLVM_DEBUG(Logger->logRangeln(fetchRangeNode(v)));
 }
 
-void VRAnalyzer::fallbackCMP(const Instruction* I) {
-  saveValueRange(I, getGenericBoolRange());
-  LLVM_DEBUG({
-    Logger->logInstruction(I);
-    Logger->logInfoln("fallback CMP range forced to [0,1]");
-  });
-}
-
 size_t VRAnalyzer::compareLoadStoreDim(VRAFunctionInfo VFI, const llvm::Value *load, const llvm::Value *store) {
 
   const auto *LoadI = dyn_cast<LoadInst>(load);
@@ -921,48 +913,48 @@ void VRAnalyzer::resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount) {
 }
 
 void VRAnalyzer::retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInfo& VRI) {
-  if (!VRI.lastRange) return;
+  if (!VRI.lastRange)
+    return;
 
   LLVM_DEBUG(Logger->logInstruction(I));
+  auto makeSolvedScalarNode = [&](const std::shared_ptr<ValueInfo>& baseNode) -> std::shared_ptr<ValueInfo> {
+    if (baseNode && baseNode->getKind() == ValueInfo::K_Scalar) {
+      auto Scalar = std::static_pointer_cast<ScalarInfo>(baseNode);
+      auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
+      Cloned->range = VRI.lastRange;
+      return Cloned;
+    }
+    return std::make_shared<ScalarInfo>(nullptr, VRI.lastRange);
+  };
+  
+  if (auto* PN = llvm::dyn_cast<llvm::PHINode>(VRI.root)) {
+    auto solved = makeSolvedScalarNode(getNode(VRI.root));
+    setNode(VRI.root, solved);
 
-  if (auto* PN = dyn_cast<PHINode>(VRI.root)) {
-      const Value* op = PN->getIncomingValue(0);
-      std::shared_ptr<ValueInfo> op_node = getNode(op);
-      if (std::shared_ptr<ValueInfoWithRange> op_range = std::dynamic_ptr_cast<ScalarInfo>(op_node)) {
-        const std::shared_ptr<ScalarInfo> s_op = std::dynamic_ptr_cast<ScalarInfo>(op_range);
-        s_op->range = VRI.lastRange;
-        setNode(VRI.root, s_op);
-        LLVM_DEBUG(Logger->logRangeln(op_range));
-      }
+    LLVM_DEBUG(Logger->logRangeln(VRI.lastRange));
+    return;
+  }
+  if (auto* Store = llvm::dyn_cast<llvm::StoreInst>(VRI.root)) {
+    const llvm::Value* AddressParam = Store->getPointerOperand();
+    const llvm::Value* ValueParam   = Store->getValueOperand();
+
+    if (llvm::isa<llvm::ConstantPointerNull>(ValueParam))
       return;
-    } else if (auto Store = dyn_cast<StoreInst>(VRI.root)) {
 
-      const Value* AddressParam = Store->getPointerOperand();
-      const Value* ValueParam = Store->getValueOperand();
+    std::shared_ptr<ValueInfo> AddressNode = getNode(AddressParam);
+    std::shared_ptr<ValueInfo> ValueNode = getNode(ValueParam);
 
-      if (isa<ConstantPointerNull>(ValueParam)) return;
+    if (!ValueNode && !ValueParam->getType()->isPointerTy())
+      ValueNode = fetchRangeNode(VRI.root);
 
-      std::shared_ptr<ValueInfo> AddressNode = getNode(AddressParam);
-      std::shared_ptr<ValueInfo> ValueNode = getNode(ValueParam);
-
-      if (!ValueNode && !ValueParam->getType()->isPointerTy())
-        ValueNode = fetchRangeNode(VRI.root);
-        
-      if (!ValueParam->getType()->isPointerTy()) {
-        if (auto Scalar = std::dynamic_ptr_cast_or_null<ScalarInfo>(ValueNode)) {
-          auto Cloned = std::static_pointer_cast<ScalarInfo>(Scalar->clone());
-          Cloned->range = VRI.lastRange;
-          ValueNode = Cloned;
-        } else if (!ValueNode) {
-          ValueNode = std::make_shared<ScalarInfo>(nullptr, VRI.lastRange);
-        }
-      }
-
-      storeNode(AddressNode, ValueNode);
-      LLVM_DEBUG(Logger->logRangeln(VRI.lastRange));
-      return;
+    if (!ValueParam->getType()->isPointerTy()) {
+      ValueNode = makeSolvedScalarNode(ValueNode);
     }
 
+    storeNode(AddressNode, ValueNode);
+    LLVM_DEBUG(Logger->logRangeln(VRI.lastRange));
+    return;
+  }
 }
 
 std::shared_ptr<taffo::RangedRecurrence> VRAnalyzer::buildAffinePHIRecurrence(const llvm::PHINode *phi) {

@@ -52,8 +52,6 @@ public:
   std::shared_ptr<Range>getBBRange(const llvm::Value *V);
   std::shared_ptr<Range> getRRJoinedRange(RangedRecurrence* RR, u_int64_t TC);
 
-  void fallbackCMP(const llvm::Instruction* I);
-
   //affine standard
   std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) override;
   std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;

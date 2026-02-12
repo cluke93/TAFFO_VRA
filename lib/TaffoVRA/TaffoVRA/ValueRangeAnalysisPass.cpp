@@ -47,20 +47,22 @@ PreservedAnalyses ValueRangeAnalysisPass::run(Module& M, ModuleAnalysisManager& 
   // No need to initialize if memToReg is run before in the same opt call
   // TaffoInfo::getInstance().initializeFromFile("taffo_info_memToReg.json", M);
 
-  std::shared_ptr<VRAGlobalStore> GlobalStore = std::make_shared<VRAGlobalStore>();
-  GlobalStore->harvestValueInfo(M);
-
   if (UseOldVRA) {
+    std::shared_ptr<VRAGlobalStore> GlobalStore = std::make_shared<VRAGlobalStore>();
+    GlobalStore->harvestValueInfo(M);
+
     CodeInterpreter CodeInt(AM, GlobalStore, Unroll, MaxUnroll);
     processModule(CodeInt, M);
+    LLVM_DEBUG(log() << "saving results...\n");
+    GlobalStore->saveResults(M);
+
   } else {
-    ModuleInterpreter ModInt(M, AM, GlobalStore);
+    ModuleInterpreter ModInt(M, AM);
     ModInt.interpret();
     ModInt.printRecurrenceSummary(llvm::errs());
   }
 
-  LLVM_DEBUG(log() << "saving results...\n");
-  GlobalStore->saveResults(M);
+
 
   TaffoInfo::getInstance().dumpToFile(VRA_TAFFO_INFO, M);
   LLVM_DEBUG(log().logln("[End of ValueRangeAnalysisPass]", Logger::Magenta));
