@@ -50,7 +50,7 @@ STATISTIC(NumPHIInsert, "Number of PHI nodes inserted");
 
 static void propagateTaffoInfo(Value& src, Value& dst) {
   TaffoInfo& taffoInfo = TaffoInfo::getInstance();
-  if (taffoInfo.hasValueInfo(src)) {
+  if (taffoInfo.hasValueInfo(src) && (!taffoInfo.hasValueInfo(dst) || !taffoInfo.getValueInfo(dst)->isForced())) {
     taffoInfo.setValueInfo(dst, taffoInfo.getValueInfo(src)->clone());
     LLVM_DEBUG(
       Logger& logger = log();
