@@ -188,6 +188,13 @@ public:
         return nullptr;
     }
 
+    VRAFunctionInfo* getVRAFunctionInfo(llvm::Function* F) {
+        if (FNs.count(F)) {
+            return &FNs[F];
+        }
+        return nullptr;
+    }
+
 
     std::shared_ptr<Range> getLastStoredRange(const llvm::Value* BaseStore);
 

@@ -90,6 +90,10 @@ public:
   virtual std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildPHIGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) = 0;
   virtual std::shared_ptr<RangedRecurrence> buildGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildLinearFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0; // to remove
+
+  virtual std::shared_ptr<RangedRecurrence> buildAffinePHIMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildAffineStoreMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
 
   // delta
   virtual std::shared_ptr<RangedRecurrence> buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) = 0;
@@ -118,8 +122,8 @@ protected:
 };
 
 struct FunctionScope {
-  FunctionScope() {}
-  FunctionScope(std::shared_ptr<AnalysisStore> FS) : FunctionStore(FS) {}
+  FunctionScope() = default;
+  FunctionScope(std::shared_ptr<AnalysisStore> FS) : FunctionStore(std::move(FS)) {}
 
   std::shared_ptr<AnalysisStore> FunctionStore;
   llvm::DenseMap<llvm::BasicBlock*, std::shared_ptr<CodeAnalyzer>> BBAnalyzers;

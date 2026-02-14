@@ -48,9 +48,12 @@ public:
   void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
   void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
 
-  std::shared_ptr<Range>getRange(const std::shared_ptr<ValueInfo> Range);
-  std::shared_ptr<Range>getBBRange(const llvm::Value *V);
+  std::shared_ptr<Range> getRange(const std::shared_ptr<ValueInfo> Range);
+  std::shared_ptr<Range> getBBRange(const llvm::Value *V);
   std::shared_ptr<Range> getRRJoinedRange(RangedRecurrence* RR, u_int64_t TC);
+  std::shared_ptr<Range> fetchRangeForCallArg(llvm::Value *Arg);
+  std::shared_ptr<Range> extractDeltaFromStoreValue(const llvm::Value* StoreVal, const llvm::Value* LoadJunction, const llvm::StoreInst* Store);
+  std::shared_ptr<Range> extractDeltaFromPhiValue(const llvm::PHINode* Phi, const llvm::BasicBlock* Preheader, const llvm::BasicBlock* Latch);
 
   //affine standard
   std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) override;
@@ -63,6 +66,10 @@ public:
   std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
   std::shared_ptr<RangedRecurrence> buildPHIGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) override;
   std::shared_ptr<RangedRecurrence> buildGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+  std::shared_ptr<RangedRecurrence> buildLinearFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+
+  std::shared_ptr<RangedRecurrence> buildAffinePHIMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) override;
+  std::shared_ptr<RangedRecurrence> buildAffineStoreMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
 
   //delta
   std::shared_ptr<RangedRecurrence> buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* store, VRARecurrenceInfo* InnerVRI) override;
