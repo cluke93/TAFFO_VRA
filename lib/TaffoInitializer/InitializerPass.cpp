@@ -112,6 +112,9 @@ void InitializerPass::propagateInfo() {
         if (value->user_empty())
           logger.logln("value has no users: continuing"););
 
+      if (value->user_empty())
+        continue;
+
       // Process each user of the current value
       for (auto* user : value->users()) {
         // Skip PHI nodes already processed

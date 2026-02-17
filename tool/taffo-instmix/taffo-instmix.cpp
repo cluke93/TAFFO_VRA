@@ -135,7 +135,12 @@ int main(int argc, char* argv[]) {
   if (Verbose) {
     std::cerr << "Successfully read Module:" << std::endl;
     std::cerr << " Name: " << m.get()->getName().str() << std::endl;
-    std::cerr << " Target triple: " << m->getTargetTriple() << std::endl;
+    std::cerr << " Target triple: "
+              << m->getTargetTriple()
+#if LLVM_VERSION_MAJOR >= 21
+                   .str()
+#endif
+              << std::endl;
   }
 
   int eval = 0;

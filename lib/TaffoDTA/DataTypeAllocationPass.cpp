@@ -535,6 +535,9 @@ bool DataTypeAllocationPass::propagateTypeAcrossCalls(Value* value) {
     changed |= propagateGepType(gep);
   }
 
+  if (value->use_empty())
+    return changed;
+
   for (Use& use : value->uses()) {
     User* user = use.getUser();
     if (auto* call = dyn_cast<CallBase>(user)) {
