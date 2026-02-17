@@ -441,7 +441,7 @@ static bool rewriteSingleStoreAlloca(
     // it with an assume.
 
 
-#if (LLVM_VERSION_MAJOR == 18)
+#if (LLVM_VERSION_MAJOR == 17) || (LLVM_VERSION_MAJOR == 18)
       if (AC && LI->getMetadata(LLVMContext::MD_nonnull)
           && !isKnownNonZero(ReplVal, DL, 0, AC, LI, &DT))
                 addAssumeNonNull(AC, LI);
@@ -554,7 +554,7 @@ static bool promoteSingleBlockAlloca(AllocaInst* AI,
       Value* ReplVal = std::prev(I)->second->getOperand(0);
 
 
-#if (LLVM_VERSION_MAJOR == 18)
+#if (LLVM_VERSION_MAJOR == 17) || (LLVM_VERSION_MAJOR == 18)
       if (AC && LI->getMetadata(LLVMContext::MD_nonnull)
           && !isKnownNonZero(ReplVal, DL, 0, AC, LI, &DT))
                 addAssumeNonNull(AC, LI);
@@ -1022,7 +1022,7 @@ NextIteration:
       // that information when we erase this Load. So we preserve
       // it with an assume.
 
-#if (LLVM_VERSION_MAJOR == 18)
+#if (LLVM_VERSION_MAJOR == 17) || (LLVM_VERSION_MAJOR == 18)
       if (AC && LI->getMetadata(LLVMContext::MD_nonnull)
           && !isKnownNonZero(V, SQ.DL, 0, AC, LI, &DT))
                 addAssumeNonNull(AC, LI);
