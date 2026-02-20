@@ -531,7 +531,7 @@ void ModuleInterpreter::resolve() {
         }
 
         ++iteration;
-        if ((MaxPropagation && iteration > MaxPropagation) || (solvedRR.size() == 0 && remainingUnsolvedRR > 0)) {
+        if ((MaxPropagation && iteration > MaxPropagation) || (solvedRR.size() + solvedTC == 0 && remainingUnsolvedRR > 0)) {
             LLVM_DEBUG(tda::log() << "Propagation interrupted: after " << iteration << " iteration(s) no fixed point reached: widening falling back remaining RR and last iteration\n");
             fallback();
             isFallback = true;
@@ -548,7 +548,7 @@ void ModuleInterpreter::resolve() {
             LLVM_DEBUG(tda::log() << "propagation iter " << iteration << " completed.\n");
             LLVM_DEBUG(tda::log() <<   "------------------------------------------------------------------------------\n\n");
         }
-    } while (solvedRR.size() != 0 && !isFallback);
+    } while (solvedRR.size() + solvedTC != 0 && !isFallback);
 
     LLVM_DEBUG(tda::log() << "saving results...\n");
     GlobalStore->saveResults(M);
