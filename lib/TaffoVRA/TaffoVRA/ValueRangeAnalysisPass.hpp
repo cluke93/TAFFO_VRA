@@ -13,6 +13,9 @@ extern llvm::cl::opt<bool> PropagateAll;
 extern llvm::cl::opt<unsigned> Unroll;
 extern llvm::cl::opt<unsigned> MaxUnroll;
 
+extern llvm::cl::opt<bool> UseOldVRA;
+extern llvm::cl::opt<unsigned> MaxPropagation;
+
 class ValueRangeAnalysisPass : public llvm::PassInfoMixin<ValueRangeAnalysisPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& AM);

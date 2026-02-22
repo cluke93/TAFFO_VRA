@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
   int tsteps = TSTEPS;
 
   /* Variable declaration/allocation. */
-  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("target('A') scalar()"))), N, N, n, n);
+  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("target('A') scalar(range(0,0))"))), N, N, n, n);
 
   /* Initialize array(s). */
   init_array(n, POLYBENCH_ARRAY(A));

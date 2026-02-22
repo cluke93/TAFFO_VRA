@@ -102,7 +102,8 @@ int main(int argc, char** argv) {
   DATA_TYPE __attribute__((annotate("scalar()"))) alpha;
   DATA_TYPE __attribute__((annotate("scalar()"))) beta;
   POLYBENCH_2D_ARRAY_DECL(C, DATA_TYPE __attribute__((annotate("target('C') scalar()"))), NI, NJ, ni, nj);
-  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("scalar(range(-64, 64))"))), NI, NK, ni, nk);
+  //POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("scalar(range(-64, 64))"))), NI, NK, ni, nk); // OLD_VRA
+  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("scalar(range(0, 0))"))), NI, NK, ni, nk);
   POLYBENCH_2D_ARRAY_DECL(B, DATA_TYPE __attribute__((annotate("scalar()"))), NK, NJ, nk, nj);
 
   /* Initialize array(s). */

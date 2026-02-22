@@ -10,6 +10,12 @@ namespace taffo {
 
 class CodeInterpreter;
 class CodeAnalyzer;
+class ModuleInterpreter;
+class VRARecurrenceInfo;
+class VRAAssignationInfo;
+class VRAFunctionInfo;
+class RangedRecurrence;
+class Range;
 
 class CILogger {
 public:
@@ -37,6 +43,10 @@ public:
   virtual void convexMerge(const AnalysisStore& Other) = 0;
   virtual std::shared_ptr<CodeAnalyzer> newCodeAnalyzer(CodeInterpreter& CI) = 0;
   virtual std::shared_ptr<AnalysisStore> newFunctionStore(CodeInterpreter& CI) = 0;
+
+  virtual std::shared_ptr<CodeAnalyzer> newInstructionAnalyzer(ModuleInterpreter& FI) = 0;
+  virtual std::shared_ptr<AnalysisStore> newFnStore(ModuleInterpreter& CI) = 0;
+
   virtual bool hasValue(const llvm::Value* V) const = 0;
   virtual std::shared_ptr<CILogger> getLogger() const = 0;
   virtual ~AnalysisStore() = default;
@@ -60,11 +70,47 @@ class CodeAnalyzer : public AnalysisStore {
 public:
   virtual std::shared_ptr<CodeAnalyzer> clone() = 0;
   virtual void analyzeInstruction(llvm::Instruction* I) = 0;
-  virtual void
-  setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) = 0;
+  virtual void analyzePHIStartInstruction(llvm::Instruction* I) = 0;
+  virtual void retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInfo& VRI) = 0;
+  virtual void resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount) = 0;
+  virtual void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) = 0;
   virtual bool requiresInterpretation(llvm::Instruction* I) const = 0;
   virtual void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;
   virtual void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;
+
+  virtual void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;
+  virtual void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) = 0;
+
+  virtual std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildFakeStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
+
+  //flattened
+  virtual std::shared_ptr<RangedRecurrence> buildPHIAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildPHIGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildLinearFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0; // to remove
+
+  virtual std::shared_ptr<RangedRecurrence> buildAffinePHIMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildAffineStoreMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
+
+  // delta
+  virtual std::shared_ptr<RangedRecurrence> buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildDeltaAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildDeltaGeometricPHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi, VRARecurrenceInfo* InnerVRI) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildDeltaGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) = 0;
+
+  virtual std::pair<std::shared_ptr<RangedRecurrence>, std::shared_ptr<RangedRecurrence>> buildStoreCrossingAffineRecurrence(VRAAssignationInfo first, VRAAssignationInfo second) = 0;
+  virtual std::pair<std::shared_ptr<RangedRecurrence>, std::shared_ptr<RangedRecurrence>> buildStoreCrossingGeometricRecurrence(VRAAssignationInfo first, VRAAssignationInfo second) = 0;
+
+  virtual std::shared_ptr<RangedRecurrence> buildInitRecurrence(std::shared_ptr<Range> LastStoredRange, const llvm::StoreInst *store) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildGeometricPHIRecurrence(const llvm::PHINode *phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) = 0;
+  virtual std::shared_ptr<RangedRecurrence> buildLinearRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) = 0;
+
+  virtual size_t compareLoadStoreDim(VRAFunctionInfo VFI, const llvm::Value *load, const llvm::Value *store) = 0;
 
   static bool classof(const AnalysisStore* AS) {
     return AS->getKind() >= ASK_VRAGlobalStore && AS->getKind() <= ASK_VRAnalyzer;
@@ -76,8 +122,8 @@ protected:
 };
 
 struct FunctionScope {
-  FunctionScope(std::shared_ptr<AnalysisStore> FS)
-  : FunctionStore(FS) {}
+  FunctionScope() = default;
+  FunctionScope(std::shared_ptr<AnalysisStore> FS) : FunctionStore(std::move(FS)) {}
 
   std::shared_ptr<AnalysisStore> FunctionStore;
   llvm::DenseMap<llvm::BasicBlock*, std::shared_ptr<CodeAnalyzer>> BBAnalyzers;

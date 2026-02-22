@@ -1,8 +1,11 @@
 #include "RangeOperations.hpp"
 #include "VRAStore.hpp"
+#include "ValueRangeAnalysisPass.hpp"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
+#include <llvm/IR/BasicBlock.h>
 #include <llvm/Support/Debug.h>
 
 #define DEBUG_TYPE "taffo-vra"
@@ -13,15 +16,58 @@ using namespace taffo;
 
 void VRAStore::convexMerge(const VRAStore& other) {
   for (const auto& [value, otherValueInfo] : other.DerivedRanges) {
-    if (std::shared_ptr<ValueInfo> valueInfo = this->getNode(value)) {
-      if (std::isa_ptr<StructInfo>(valueInfo))
-        assignStructNode(valueInfo, otherValueInfo);
-      else if (std::shared_ptr<ScalarInfo> unionInfo = assignScalarRange(valueInfo, otherValueInfo))
+    std::shared_ptr<ValueInfo> currentInfo = this->getNode(value);
+    //std::shared_ptr<ValueInfo> finalInfo = currentInfo;
+
+    if (currentInfo) {
+      if (std::isa_ptr<StructInfo>(currentInfo)) {
+        assignStructNode(currentInfo, otherValueInfo);
+        //finalInfo = currentInfo;
+      }
+      else if (std::shared_ptr<ScalarInfo> unionInfo = assignScalarRange(currentInfo, otherValueInfo)) {
         DerivedRanges[value] = unionInfo;
+        //finalInfo = unionInfo;
+      }
     }
     else {
       DerivedRanges[value] = otherValueInfo;
+      //finalInfo = otherValueInfo;
     }
+
+    // remove comment in case of desperate debugging
+    // LLVM_DEBUG({
+    //   const BasicBlock* BB = nullptr;
+    //   const Function* F = nullptr;
+    //   if (const auto* I = dyn_cast<Instruction>(value)) {
+    //     BB = I->getParent();
+    //     F = I->getFunction();
+    //   }
+    //   else if (const auto* Arg = dyn_cast<Argument>(value)) {
+    //     F = Arg->getParent();
+    //   }
+    //   const std::string BBName = BB && BB->hasName() ? BB->getName().str() : "";
+    //   const std::string FnName = F ? F->getName().str() : "";
+
+    //   Logger->lineHead();
+    //   tda::log() << "\nmerge " << *value << " GlobalStore=";
+    //   Logger->logRange(currentInfo);
+    //   tda::log() << " Incoming";
+    //   if (!BBName.empty() || !FnName.empty()) {
+    //     tda::log() << " from ";
+    //     if (!BBName.empty())
+    //       tda::log() << BBName;
+    //     if (!FnName.empty()) {
+    //       if (!BBName.empty())
+    //         tda::log() << "/";
+    //       tda::log() << FnName;
+    //     }
+    //   }
+    //   tda::log() << ":";
+    //   Logger->logRange(otherValueInfo);
+    //   tda::log() << " Final=";
+    //   Logger->logRange(finalInfo);
+    //   tda::log() << "\n\n";
+    // });
   }
 }
 
@@ -108,15 +154,15 @@ std::shared_ptr<ValueInfo> VRAStore::loadNode(const std::shared_ptr<ValueInfo>& 
   }
 }
 
-std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<ValueInfo>& dst,
-                                                        const std::shared_ptr<ValueInfo>& src) const {
+std::shared_ptr<ScalarInfo> VRAStore::assignScalarRange(const std::shared_ptr<ValueInfo>& dst, const std::shared_ptr<ValueInfo>& src) const {
   std::shared_ptr<ScalarInfo> scalarDst = std::dynamic_ptr_cast_or_null<ScalarInfo>(dst);
   const std::shared_ptr<ScalarInfo> scalarSrc = std::dynamic_ptr_cast_or_null<ScalarInfo>(src);
   if (!scalarDst || !scalarSrc)
     return nullptr;
   if (scalarDst->isFinal())
     return scalarDst;
-  std::shared_ptr<Range> unionRange = getUnionRange(scalarDst->range, scalarSrc->range);
+
+  std::shared_ptr<Range> unionRange = scalarDst->range->join(scalarSrc->range);
   return std::make_shared<ScalarInfo>(nullptr, unionRange);
 }
 

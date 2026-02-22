@@ -10,6 +10,8 @@
 
 namespace taffo {
 
+class ModuleInterpreter;
+
 class VRAGlobalStore : protected VRAStore,
                        public AnalysisStore {
 public:
@@ -19,6 +21,9 @@ public:
   void convexMerge(const AnalysisStore& other) override;
   std::shared_ptr<CodeAnalyzer> newCodeAnalyzer(CodeInterpreter& CI) override;
   std::shared_ptr<AnalysisStore> newFunctionStore(CodeInterpreter& CI) override;
+
+  std::shared_ptr<CodeAnalyzer> newInstructionAnalyzer(ModuleInterpreter& MI) override;
+  std::shared_ptr<AnalysisStore> newFnStore(ModuleInterpreter& MI) override;
 
   bool hasValue(const llvm::Value* V) const override {
     auto It = DerivedRanges.find(V);

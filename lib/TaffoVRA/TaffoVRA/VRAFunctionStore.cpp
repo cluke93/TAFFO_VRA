@@ -2,6 +2,8 @@
 #include "VRAFunctionStore.hpp"
 #include "VRAGlobalStore.hpp"
 #include "VRAnalyzer.hpp"
+#include "ModuleInterpreter.hpp"
+#include "ValueRangeAnalysisPass.hpp"
 
 #define DEBUG_TYPE "taffo-vra"
 
@@ -18,11 +20,19 @@ void VRAFunctionStore::convexMerge(const AnalysisStore& Other) {
 }
 
 std::shared_ptr<CodeAnalyzer> VRAFunctionStore::newCodeAnalyzer(CodeInterpreter& CI) {
-  return std::make_shared<VRAnalyzer>(std::static_ptr_cast<VRALogger>(CI.getGlobalStore()->getLogger()), CI);
+  return std::make_shared<VRAnalyzer>(std::static_ptr_cast<VRALogger>(CI.getGlobalStore()->getLogger()), &CI);
 }
 
 std::shared_ptr<AnalysisStore> VRAFunctionStore::newFunctionStore(CodeInterpreter& CI) {
   return std::make_shared<VRAFunctionStore>(std::static_ptr_cast<VRALogger>(CI.getGlobalStore()->getLogger()));
+}
+
+std::shared_ptr<CodeAnalyzer> VRAFunctionStore::newInstructionAnalyzer(ModuleInterpreter& MI) {
+  return std::make_shared<VRAnalyzer>(std::static_ptr_cast<VRALogger>(MI.getGlobalStore()->getLogger()), &MI);
+}
+
+std::shared_ptr<AnalysisStore> VRAFunctionStore::newFnStore(ModuleInterpreter& MI) {
+  return std::make_shared<VRAFunctionStore>(std::static_ptr_cast<VRALogger>(MI.getGlobalStore()->getLogger()));
 }
 
 void VRAFunctionStore::setRetVal(std::shared_ptr<ValueInfo> RetVal) {
@@ -30,8 +40,13 @@ void VRAFunctionStore::setRetVal(std::shared_ptr<ValueInfo> RetVal) {
     return;
 
   if (std::shared_ptr<ValueInfoWithRange> RetRange = std::dynamic_ptr_cast<ValueInfoWithRange>(RetVal)) {
-    std::shared_ptr<ValueInfoWithRange> ReturnRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(ReturnValue);
-    ReturnValue = getUnionRange(ReturnRange, RetRange);
+
+    if (UseOldVRA) {
+      std::shared_ptr<ValueInfoWithRange> ReturnRange = std::dynamic_ptr_cast_or_null<ValueInfoWithRange>(ReturnValue);
+      ReturnValue = getUnionRange(ReturnRange, RetRange);
+    } else {
+      ReturnValue = RetRange;
+    }
   }
   else {
     ReturnValue = RetVal;

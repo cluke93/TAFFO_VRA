@@ -88,9 +88,12 @@ int main(int argc, char** argv) {
   int np = NP;
 
   /* Variable declaration/allocation. */
+  //POLYBENCH_3D_ARRAY_DECL(          
+  //  A, DATA_TYPE __attribute__((annotate("target('A') scalar(range(-32, 31) )"))), NR, NQ, NP, nr, nq, np); // OLD VRA
+  //POLYBENCH_1D_ARRAY_DECL(sum, DATA_TYPE __attribute__((annotate("scalar(range(-32, 31) )"))), NP, np); // OLD VRA
   POLYBENCH_3D_ARRAY_DECL(
-    A, DATA_TYPE __attribute__((annotate("target('A') scalar(range(-32, 31) )"))), NR, NQ, NP, nr, nq, np);
-  POLYBENCH_1D_ARRAY_DECL(sum, DATA_TYPE __attribute__((annotate("scalar(range(-32, 31) )"))), NP, np);
+    A, DATA_TYPE __attribute__((annotate("target('A') scalar(range(0, 0) )"))), NR, NQ, NP, nr, nq, np);
+  POLYBENCH_1D_ARRAY_DECL(sum, DATA_TYPE __attribute__((annotate("scalar(range(0, 0) )"))), NP, np);
   POLYBENCH_2D_ARRAY_DECL(C4, DATA_TYPE __attribute__((annotate("scalar()"))), NP, NP, np, np);
 
   /* Initialize array(s). */

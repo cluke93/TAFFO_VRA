@@ -6,6 +6,8 @@
 #include "VRALogger.hpp"
 #include "VRAStore.hpp"
 
+#include "ModuleInterpreter.hpp"
+
 #define DEBUG_TYPE "taffo-vra"
 
 namespace taffo {
@@ -13,12 +15,18 @@ namespace taffo {
 class VRAnalyzer : protected VRAStore,
                    public CodeAnalyzer {
 public:
-  VRAnalyzer(std::shared_ptr<VRALogger> VRAL, CodeInterpreter& CI)
-  : VRAStore(VRASK_VRAnalyzer, VRAL), CodeAnalyzer(ASK_VRAnalyzer), CodeInt(CI) {}
+  VRAnalyzer(std::shared_ptr<VRALogger> VRAL, CodeInterpreter* CI)
+  : VRAStore(VRASK_VRAnalyzer, VRAL), CodeAnalyzer(ASK_VRAnalyzer), CodeInt(CI), ModInt(nullptr) {}
+  VRAnalyzer(std::shared_ptr<VRALogger> VRAL, ModuleInterpreter* MI)
+  : VRAStore(VRASK_VRAnalyzer, VRAL), CodeAnalyzer(ASK_VRAnalyzer), CodeInt(nullptr), ModInt(MI) {}
+
+  using VRAStore::saveValueRange;
 
   void convexMerge(const AnalysisStore& other) override;
   std::shared_ptr<CodeAnalyzer> newCodeAnalyzer(CodeInterpreter& CI) override;
   std::shared_ptr<AnalysisStore> newFunctionStore(CodeInterpreter& CI) override;
+  std::shared_ptr<CodeAnalyzer> newInstructionAnalyzer(ModuleInterpreter& MI) override;
+  std::shared_ptr<AnalysisStore> newFnStore(ModuleInterpreter& MI) override;
 
   bool hasValue(const llvm::Value* V) const override {
     auto It = DerivedRanges.find(V);
@@ -27,12 +35,59 @@ public:
 
   std::shared_ptr<CILogger> getLogger() const override { return Logger; }
   std::shared_ptr<CodeAnalyzer> clone() override;
+
   void analyzeInstruction(llvm::Instruction* I) override;
-  void
-  setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) override;
+  void analyzePHIStartInstruction(llvm::Instruction* I) override;
+  void resolveRecurrence(VRARecurrenceInfo& VRI, unsigned TripCount) override;
+  void retrieveSolvedRecurrence(llvm::Instruction* I, VRARecurrenceInfo& VRI) override;
+  void setPathLocalInfo(std::shared_ptr<CodeAnalyzer> SuccAnalyzer, llvm::Instruction* TermInstr, unsigned SuccIdx) override;
   bool requiresInterpretation(llvm::Instruction* I) const override;
   void prepareForCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
   void returnFromCall(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
+
+  void prepareForCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
+  void returnFromCallPropagation(llvm::Instruction* I, std::shared_ptr<AnalysisStore> FunctionStore) override;
+
+  std::shared_ptr<Range> getRange(const std::shared_ptr<ValueInfo> Range);
+  std::shared_ptr<Range> getBBRange(const llvm::Value *V);
+  std::shared_ptr<Range> getRRJoinedRange(RangedRecurrence* RR, u_int64_t TC);
+  std::shared_ptr<Range> fetchRangeForCallArg(llvm::Value *Arg);
+  std::shared_ptr<Range> extractDeltaFromStoreValue(const llvm::Value* StoreVal, const llvm::Value* LoadJunction, const llvm::StoreInst* Store);
+  std::shared_ptr<Range> extractDeltaFromPhiValue(const llvm::PHINode* Phi, const llvm::BasicBlock* Preheader, const llvm::BasicBlock* Latch);
+
+  //affine standard
+  std::shared_ptr<RangedRecurrence> buildAffinePHIRecurrence(const llvm::PHINode *phi) override;
+  std::shared_ptr<RangedRecurrence> buildAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
+  
+  std::shared_ptr<RangedRecurrence> buildFakeStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
+
+  // flattened
+  std::shared_ptr<RangedRecurrence> buildPHIAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) override;
+  std::shared_ptr<RangedRecurrence> buildAffineFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+  std::shared_ptr<RangedRecurrence> buildPHIGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) override;
+  std::shared_ptr<RangedRecurrence> buildGeometricFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+  std::shared_ptr<RangedRecurrence> buildLinearFlattingRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+
+  std::shared_ptr<RangedRecurrence> buildAffinePHIMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* phi) override;
+  std::shared_ptr<RangedRecurrence> buildAffineStoreMulAddRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+
+  //delta
+  std::shared_ptr<RangedRecurrence> buildDeltaAffinePHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* store, VRARecurrenceInfo* InnerVRI) override;
+  std::shared_ptr<RangedRecurrence> buildDeltaAffineStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) override;
+  std::shared_ptr<RangedRecurrence> buildDeltaGeometricPHIRecurrence(VRARecurrenceInfo VRI, const llvm::PHINode* store, VRARecurrenceInfo* InnerVRI) override;
+  std::shared_ptr<RangedRecurrence> buildDeltaGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store, VRARecurrenceInfo* InnerVRI) override;
+
+  //crossing
+  std::pair<std::shared_ptr<RangedRecurrence>, std::shared_ptr<RangedRecurrence>> buildStoreCrossingAffineRecurrence(VRAAssignationInfo first, VRAAssignationInfo second) override;
+  std::pair<std::shared_ptr<RangedRecurrence>, std::shared_ptr<RangedRecurrence>> buildStoreCrossingGeometricRecurrence(VRAAssignationInfo first, VRAAssignationInfo second) override;
+  
+  std::shared_ptr<RangedRecurrence> buildInitRecurrence(std::shared_ptr<Range> LastStoredRange, const llvm::StoreInst *store) override;
+  std::shared_ptr<RangedRecurrence> buildUnknownRecurrence(const llvm::Value *V) override;
+  std::shared_ptr<RangedRecurrence> buildGeometricPHIRecurrence(const llvm::PHINode *phi) override;
+  std::shared_ptr<RangedRecurrence> buildGeometricStoreRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst*phi) override;
+  std::shared_ptr<RangedRecurrence> buildLinearRecurrence(VRARecurrenceInfo VRI, const llvm::StoreInst* store) override;
+
+  size_t compareLoadStoreDim(VRAFunctionInfo VFI, const llvm::Value *load, const llvm::Value *store) override;
 
   static bool classof(const AnalysisStore* AS) { return AS->getKind() == ASK_VRAnalyzer; }
 
@@ -78,11 +133,11 @@ private:
 
   // Interface with CodeInterpreter
   std::shared_ptr<VRAGlobalStore> getGlobalStore() const {
-    return std::static_ptr_cast<VRAGlobalStore>(CodeInt.getGlobalStore());
+    return CodeInt ? std::static_ptr_cast<VRAGlobalStore>(CodeInt->getGlobalStore()) : std::static_ptr_cast<VRAGlobalStore>(ModInt->getGlobalStore());
   }
 
   std::shared_ptr<VRAStore> getAnalysisStoreForValue(const llvm::Value* V) const {
-    std::shared_ptr<AnalysisStore> AStore = CodeInt.getStoreForValue(V);
+    std::shared_ptr<AnalysisStore> AStore = CodeInt ? CodeInt->getStoreForValue(V) : ModInt->getStoreForValue(V);
     if (!AStore)
       return nullptr;
 
@@ -99,7 +154,8 @@ private:
   // Logging
   void logRangeln(const llvm::Value* v);
 
-  CodeInterpreter& CodeInt;
+  CodeInterpreter* CodeInt;
+  ModuleInterpreter* ModInt;
 };
 
 } // end namespace taffo

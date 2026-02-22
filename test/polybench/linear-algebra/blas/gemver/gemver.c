@@ -114,15 +114,20 @@ int main(int argc, char** argv) {
   /* Variable declaration/allocation. */
   DATA_TYPE __attribute__((annotate("scalar()"))) alpha;
   DATA_TYPE __attribute__((annotate("scalar()"))) beta;
-  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("scalar(range(-2, 2) )"))), N, N, n, n);
+  //POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("scalar(range(-2, 2) )"))), N, N, n, n); // OLDVRA
+  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE __attribute__((annotate("scalar(range(0,0) )"))), N, N, n, n);
   POLYBENCH_1D_ARRAY_DECL(u1, DATA_TYPE __attribute__((annotate("scalar()"))), N, n);
   POLYBENCH_1D_ARRAY_DECL(v1, DATA_TYPE __attribute__((annotate("scalar()"))), N, n);
   POLYBENCH_1D_ARRAY_DECL(u2, DATA_TYPE __attribute__((annotate("scalar()"))), N, n);
   POLYBENCH_1D_ARRAY_DECL(v2, DATA_TYPE __attribute__((annotate("scalar()"))), N, n);
-  POLYBENCH_1D_ARRAY_DECL(w, DATA_TYPE __attribute__((annotate("target('w') scalar(range(-8000, 8000) )"))), N, n);
-  POLYBENCH_1D_ARRAY_DECL(x, DATA_TYPE __attribute__((annotate("scalar(range(-30, 30) )"))), N, n);
-  POLYBENCH_1D_ARRAY_DECL(y, DATA_TYPE __attribute((annotate("scalar()"))), N, n);
-  POLYBENCH_1D_ARRAY_DECL(z, DATA_TYPE __attribute((annotate("scalar()"))), N, n);
+  //POLYBENCH_1D_ARRAY_DECL(w, DATA_TYPE __attribute__((annotate("target('w') scalar(range(-8000, 8000) )"))), N, n); //OLDVRA
+  //POLYBENCH_1D_ARRAY_DECL(x, DATA_TYPE __attribute__((annotate("scalar(range(-30, 30) )"))), N, n);
+  //POLYBENCH_1D_ARRAY_DECL(y, DATA_TYPE __attribute((annotate("scalar()"))), N, n);
+  //POLYBENCH_1D_ARRAY_DECL(z, DATA_TYPE __attribute((annotate("scalar()"))), N, n);
+  POLYBENCH_1D_ARRAY_DECL(w, DATA_TYPE __attribute__((annotate("target('w') scalar(range(0,0) )"))), N, n);
+  POLYBENCH_1D_ARRAY_DECL(x, DATA_TYPE __attribute__((annotate("scalar(range(0,0) )"))), N, n);
+  POLYBENCH_1D_ARRAY_DECL(y, DATA_TYPE __attribute((annotate("scalar(range(0,0))"))), N, n);
+  POLYBENCH_1D_ARRAY_DECL(z, DATA_TYPE __attribute((annotate("scalar(range(0,0))"))), N, n);
 
   /* Initialize array(s). */
   init_array(n,

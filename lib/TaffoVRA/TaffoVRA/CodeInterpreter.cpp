@@ -1,6 +1,7 @@
 #include "CodeInterpreter.hpp"
 #include "Debug/Logger.hpp"
 #include "TaffoInfo/TaffoInfo.hpp"
+#include "ModuleInterpreter.hpp"
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ScalarEvolution.h>

@@ -144,6 +144,8 @@ bool AnnotationParser::parseScalar(std::shared_ptr<ValueInfo>& thisValueInfo) {
         return false;
       if (!expect(")"))
         return false;
+
+      scalarInfo->range->toAPFloat();
     }
     else if (peek("type")) {
       if (!expect("("))

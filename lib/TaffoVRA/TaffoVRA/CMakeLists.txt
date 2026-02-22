@@ -18,6 +18,11 @@ add_llvm_library(${SELF} OBJECT BUILDTREE_ONLY
   VRAFunctionStore.hpp
   VRAFunctionStore.cpp
   VRALogger.hpp
+
+  ModuleInterpreter.hpp
+  ModuleInterpreter.cpp
+  RangedRecurrences.hpp
+  RangedRecurrences.cpp
 )
 target_link_libraries(obj.${SELF} PUBLIC
   TaffoCommon

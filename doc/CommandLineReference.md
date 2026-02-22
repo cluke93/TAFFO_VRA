@@ -103,10 +103,16 @@ Disables similar adjacent type merging optimization.
 ### Error Propagation (err)
 
 #### -unroll \<count\>
-Default loop unroll count. (Default: 1)
+Default loop unroll count. Works only when use-old-vra is enabled. (Default: 1)
 
 #### -max-unroll \<count\>
-Max loop unroll count. Setting this to 0 disables loop unrolling. (Default: 256)
+Max loop unroll count. Works only when use-old-vra is enabled. Setting this to 0 disables loop unrolling. (Default: 256)
+
+#### -use-old-vra \<count\>
+Disable new vra based on recurrences. (Default: 0)
+
+#### -max-propagation \<count\>
+Maximum number of the vra propagation to avoid dependency deadlock. (Default: 10)
 
 #### -cmpthresh \<perc\>
 CMP errors are signaled only if error is above \<perc\> %. (default: 0)
