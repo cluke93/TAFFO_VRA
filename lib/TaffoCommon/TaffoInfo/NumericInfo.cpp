@@ -28,7 +28,7 @@ bool FixedPointInfo::operator==(const NumericTypeInfo& other) const {
 }
 
 std::shared_ptr<NumericTypeInfo> FixedPointInfo::clone() const {
-  return std::make_shared<FixedPointInfo>(sign, bits, fractionalBits);
+  return std::make_shared<FixedPointInfo>(sign, bits, fractionalBits, forced);
 }
 
 std::string FixedPointInfo::toString() const {
@@ -43,6 +43,7 @@ json FixedPointInfo::serialize() const {
   j["signed"] = sign;
   j["bits"] = bits;
   j["fractionalBits"] = fractionalBits;
+  j["forced"] = forced;
   return j;
 }
 
@@ -51,6 +52,7 @@ void FixedPointInfo::deserialize(const json& j) {
   sign = j["signed"].get<bool>();
   bits = j["bits"].get<int>();
   fractionalBits = j["fractionalBits"].get<unsigned>();
+  forced = j["forced"].get<bool>();
 }
 
 std::string FloatingPointInfo::getFloatStandardName(FloatStandard standard) {

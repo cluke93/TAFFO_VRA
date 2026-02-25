@@ -52,6 +52,7 @@ public:
   virtual ValueInfoKind getKind() const = 0;
   virtual bool isConversionEnabled() const = 0;
   virtual void disableConversion() {}
+  virtual bool isForced() const { return false; }
 
   template <typename ValueInfoT = ValueInfo>
   std::shared_ptr<ValueInfoT> clone() const {
@@ -102,6 +103,7 @@ public:
   void disableConversion() override { conversionEnabled = false; }
 
   bool isFinal() const { return final; }
+  bool isForced() const override { return numericType ? numericType->isForced() : false; }
 
   ScalarInfo& operator=(const ScalarInfo& other);
 

@@ -86,8 +86,11 @@ bool ConversionPass::buildConvInfo(SmallVectorImpl<Value*>* convQueue, Value* va
       return false;
     }
     if (taffoInfo.getTransparentType(*value)->containsFloatingPointType()) {
-      if (auto numericTypeInfo = scalarInfo->numericType)
+      if (auto numericTypeInfo = scalarInfo->numericType) {
         valueConvInfo->setNewType(std::make_unique<ConversionScalarType>(*type, numericTypeInfo.get()));
+        if (scalarInfo->isForced())
+          valueConvInfo->setTypeForced();
+      }
       else {
         LLVM_DEBUG(logger << Logger::Yellow << "numericType in valueInfo is null: ");
         if (isAlwaysConvertible(value)) {

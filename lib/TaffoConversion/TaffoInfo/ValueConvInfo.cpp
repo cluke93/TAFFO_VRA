@@ -16,6 +16,8 @@ std::string ValueConvInfo::toString() const {
     ss << "newType: " << *newType << ", ";
   if (isConverted)
     ss << "converted, ";
+  if (forceType)
+    ss << "forceType, ";
   ss << (isArgumentPlaceholder ? "argPlaceholder, " : "");
   ss << (isBacktrackingNode ? "backtracking, " : "");
   if (isRoot)
