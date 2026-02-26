@@ -14,11 +14,11 @@ struct ValueConvInfo : tda::Printable {
   bool isRoot = false;
   llvm::SmallPtrSet<llvm::Value*, 5> roots;
 
-  ValueConvInfo(std::unique_ptr<ConversionType> type, bool isConstant)
-  : oldType(std::move(type)), constant(isConstant), conversionDisabled(!isConstant) {}
+  ValueConvInfo(std::unique_ptr<ConversionType> type, bool isConstant, bool force = false)
+  : oldType(std::move(type)), forceType(force), constant(isConstant), conversionDisabled(!isConstant) {}
 
-  ValueConvInfo(const tda::TransparentType& type, bool isConstant)
-  : oldType(ConversionTypeFactory::create(type)), constant(isConstant), conversionDisabled(!isConstant) {}
+  ValueConvInfo(const tda::TransparentType& type, bool isConstant, bool force = false)
+  : oldType(ConversionTypeFactory::create(type)), forceType(force), constant(isConstant), conversionDisabled(!isConstant) {}
 
   ValueConvInfo& operator=(const ValueConvInfo& other) {
     isArgumentPlaceholder = other.isArgumentPlaceholder;
@@ -29,6 +29,7 @@ struct ValueConvInfo : tda::Printable {
     constant = other.constant;
     conversionDisabled = other.conversionDisabled;
     isConverted = other.isConverted;
+    forceType = other.forceType;
     return *this;
   }
 
@@ -64,6 +65,9 @@ struct ValueConvInfo : tda::Printable {
   bool isConversionDisabled() const { return conversionDisabled; }
   void enableConversion() { conversionDisabled = false; }
 
+  bool isTypeForced() const { return forceType; }
+  void setTypeForced() { forceType = true; }
+
   void setConverted() {
     assert(!constant && "Cannot set converted for a constant because they are uniqued");
     isConverted = true;
@@ -74,6 +78,7 @@ struct ValueConvInfo : tda::Printable {
 private:
   std::unique_ptr<ConversionType> oldType;
   std::unique_ptr<ConversionType> newType;
+  bool forceType;
   bool constant;
   bool conversionDisabled;
   bool isConverted = false;

@@ -40,6 +40,9 @@ Value* ConversionPass::convertInstruction(Instruction* inst) {
   };
   std::string sanitizedName = sanitizeValueName(inst);
 
+  ConversionType *forcedType =
+    taffoConvInfo.getValueConvInfo(inst)->isTypeForced() ? taffoConvInfo.getNewOrOldType(inst) : nullptr;
+
   Value* res = unsupported;
   if (auto* alloca = dyn_cast<AllocaInst>(inst))
     res = convertAlloca(alloca);
@@ -103,6 +106,14 @@ Value* ConversionPass::convertInstruction(Instruction* inst) {
   }
 
   assert(res);
+
+  if (forcedType) {
+    LLVM_DEBUG(log().logln("Forcing type", Logger::Yellow));
+    Instruction* cnv = cast<Instruction>(getConvertedOperand(res, *forcedType, cast<Instruction>(res)->getNextNode(), ConvTypePolicy::ForceHint, nullptr));
+    res = cnv;
+    setConversionResultInfo(res, inst, forcedType);
+  }
+
   return res;
 }
 
